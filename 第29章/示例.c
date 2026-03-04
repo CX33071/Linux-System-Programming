@@ -94,7 +94,7 @@ int main(){
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&t1, stack_size);
     pthread_create(&t1, &attr, pthread_func, &stack_size);
-    pthread_attr_destroy(&attr);
     pthread_join(t1,NULL);
+    pthread_attr_destroy(&attr);
     return 0;
 }
