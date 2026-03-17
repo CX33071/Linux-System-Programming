@@ -99,7 +99,7 @@ int main(){
     pthread_mutex_destroy(&mutex);
     return 0;
 }
-//条件变量:主线程通知子线程开始干活
+//条件变量
 #include <stdio.h>
 #include <pthread.h>
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -125,4 +125,19 @@ int main(){
     pthread_mutex_destroy(&mutex);
     pthread_cond_destroy(&cond);
     return 0;
+}
+//生产者、消费者
+#include <pthread.h>
+#include <stdio.h>
+int count = 0;
+pthread_mutex_t not_full;
+pthread_mutex_t not_empty;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+void* consumer(void* arg) {
+    for (int i = 0; i < 10;i++){
+        pthread_mutex_lock(&mutex);
+        while(count==5){
+            pthread_cond_wait(&not_full,)
+        }
+    }
 }
