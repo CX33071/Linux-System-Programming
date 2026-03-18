@@ -115,3 +115,8 @@ recvfrom和sendto是 UDP（数据报套接字）的核心收发函数 ——recv
 11.需要可靠、有序、无边界字节传输的场景用 TCP 流；需要高效、低延迟、按完整数据包传输的场景用 UDP 数据报
     流socket:网页浏览、文件传输、实时通讯的文字聊天如微信、QQ、
     数据报socket:音视频通话、抖音直播、网络游戏王者和平、DNS域名解析
+12.对比：UDP 的两种发送方式
+    未调用connect：必须用sendto(sfd, data, len, 0, &servaddr, sizeof(servaddr))，显式指定服务端地址；
+    调用connect后：直接用write(sfd, data, len)，数据会自动发往connect绑定的服务端地址。
+13.inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));这步是干什么的
+把 sa 指向的 sockaddr_in 结构体里的二进制 IPv4 地址（比如 0x0100007F），转换成如 "127.0.0.1" 这样的字符串，并存到 ip 缓冲区中。
