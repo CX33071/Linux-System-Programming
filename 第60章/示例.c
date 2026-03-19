@@ -12,5 +12,5 @@ int main(int argc,char *argv[]){
     
 }
 //UDP echo客户端程序
-//并发型TCP echo服务器
+//并发型TCP echo服务
 //TCP echo客户端程序
