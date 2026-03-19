@@ -6,8 +6,8 @@
 int main(int argc,char *argv[]){
     int sfd;
     ssize_t numread;
-    socklen_t addrlen, len;
-    struct sockaddr_storage claddr;
+
+
     
     
 }
