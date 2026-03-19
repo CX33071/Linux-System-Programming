@@ -9,7 +9,7 @@ int main(int argc,char *argv[]){
     socklen_t addrlen, len;
     struct sockaddr_storage claddr;
     char buf[BUF_SIZE];
-    char addrstr[ID_ADDR_STR_LEN];
+    
 }
 //UDP echo客户端程序
 //并发型TCP echo服务器
