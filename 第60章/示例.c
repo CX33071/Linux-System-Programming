@@ -8,7 +8,7 @@ int main(int argc,char *argv[]){
     ssize_t numread;
     socklen_t addrlen, len;
     struct sockaddr_storage claddr;
-    char buf[BUF_SIZE];
+    
     
 }
 //UDP echo客户端程序
