@@ -120,3 +120,9 @@ recvfrom和sendto是 UDP（数据报套接字）的核心收发函数 ——recv
     调用connect后：直接用write(sfd, data, len)，数据会自动发往connect绑定的服务端地址。
 13.inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));这步是干什么的
 把 sa 指向的 sockaddr_in 结构体里的二进制 IPv4 地址（比如 0x0100007F），转换成如 "127.0.0.1" 这样的字符串，并存到 ip 缓冲区中。
+14.地址结构
+基类    struct sockaddr
+UNIX    struct sockaddr_un
+IPv4    struct sockaddr_in
+IPv6    struct sockaddr_in6
+通用    struct sockaddr_storage
