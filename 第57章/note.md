@@ -28,5 +28,9 @@ domain参数必须是AF_UNIX,protocol参数为0
 允许一个UNIX domain socket绑定到一个名字上但不会在文件系统中创建该名字
 优势：无需担心文件名字冲突，不用在socket使用完后删除文件路径
 要创建一个抽象绑定就要将sun_path字段的第一个字节指定为null,与传统绑定区分开来
+客户端不是 “没有地址”，而是 “不需要手动绑定地址，内核会自动为它分配一个匿名 / 临时地址”
 5.UNIX domain socket流
 客户端的输入被传给服务器，服务器把这个东西作为标准输出，也就是客户端输入什么，服务器输出什么
+服务器的监听 socket（sfd）永远不会和客户端 socket 直接连接，它只做 “接单员”；真正和客户端 socket 建立连接、传输数据的，是服务器通过accept()新创建的通信 socket（cfd）
+6.网络传输的数据报不可靠，UNIX domain 数据报socket可靠
+✅ exit() 会让内核自动关闭进程打开的所有文件描述符（包括 socket 的sfd），所以从功能上看，exit 前不写close(sfd)也不会导致 socket 资源泄漏；❌ 但强烈建议先手动close(sfd)（尤其是 UNIX domain socket），因为exit()不会自动删除你手动bind的 socket 文件（如/tmp/ud_ucase_cl.12345），会导致下次运行绑定失败
