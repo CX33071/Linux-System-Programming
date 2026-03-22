@@ -1,4 +1,49 @@
 //迭代型UDP echo服务器
+#include <netinet/in.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#define PORT 8080
+#define BUF_SIZE 1024
+
+int main() {
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd == -1) {
+        perror("socket");
+        return 1;
+    }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+        perror("bind");
+        close(sockfd);
+        return 1;
+    }
+    printf("Iterative UDP echo server listening on port %d...\n", PORT);
+
+    char buf[BUF_SIZE];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    // 迭代处理：一次处理一个客户端
+    while (1) {
+        ssize_t n = recvfrom(sockfd, buf, BUF_SIZE, 0,
+                             (struct sockaddr*)&client_addr, &client_len);
+        if (n > 0) {
+            sendto(sockfd, buf, n, 0, (struct sockaddr*)&client_addr,
+                   client_len);
+        }
+    }
+    close(sockfd);
+    return 0;
+}
+
 #include <stdio.h>
 #include <sys/socket.h>
 #include <string.h>
@@ -125,4 +170,90 @@ int main(){
         }
     }
 }
-//TCP echo客户端程序
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#define PORT 8080
+#define BUF_SIZE 1024
+
+// 处理僵尸进程：SIGCHLD 信号处理函数
+void sigchld_handler(int sig) {
+    (void)sig;
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+}
+
+int main() {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd == -1) {
+        perror("socket");
+        return 1;
+    }
+
+    // 允许端口复用
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+        perror("bind");
+        close(listen_fd);
+        return 1;
+    }
+
+    if (listen(listen_fd, 5) == -1) {
+        perror("listen");
+        close(listen_fd);
+        return 1;
+    }
+    printf("Concurrent TCP echo server listening on port %d...\n", PORT);
+
+    // 注册 SIGCHLD 信号处理，避免僵尸进程
+    signal(SIGCHLD, sigchld_handler);
+
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int conn_fd =
+            accept(listen_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (conn_fd == -1) {
+            perror("accept");
+            continue;
+        }
+
+        // fork 子进程处理连接
+        pid_t pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            close(conn_fd);
+            continue;
+        }
+
+        if (pid == 0) {        // 子进程
+            close(listen_fd);  // 子进程不需要监听 socket
+            char buf[BUF_SIZE];
+            ssize_t n;
+            while ((n = read(conn_fd, buf, BUF_SIZE)) > 0) {
+                write(conn_fd, buf, n);  // echo 回显
+            }
+            close(conn_fd);
+            _exit(0);  // 子进程退出
+        } else {                  // 父进程
+            close(conn_fd);       // 父进程不需要连接 socket
+        }
+    }
+    close(listen_fd);
+    return 0;
+}
+
+//TCP echo服务器多线程版
+//TCP echo服务器I/O多路复用版
