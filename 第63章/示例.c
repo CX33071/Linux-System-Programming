@@ -154,7 +154,7 @@ void sig_handle(int sig) {
 }
 int main(){
     signal(SIGUSR1, sig_handle);
-    sigset_t new_mask, old_mask;
+    sigset_t new_mask;
     sigemptyset(&new_mask);
     sigaddset(&new_mask, SIGUSR1);
     fd_set readset;
@@ -178,6 +178,7 @@ int main(){
     return 0;
 }
 //self-pipe技巧
+//当触发ctrl+c时，往管道里写字让管道读端可读，进入if,break退出
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/select.h>
@@ -188,7 +189,7 @@ void sig_handle(int sig) {
 }
 int main(){
     pipe(pipefd);
-    signal(SIGUSR1, sig_handle);
+    signal(SIGINT, sig_handle);
     fd_set readset;
     FD_ZERO(&readset);
     FD_SET(STDIN_FILENO, &readset);
@@ -206,5 +207,106 @@ int main(){
     }
     close(pipefd[0]);
     close(pipefd[1]);
+    return 0;
+}
+//epoll高并发服务器
+#include <stdio.h>
+#include <sys/socket.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <sys/epoll.h>
+void set_nonblock(int fd){
+    int flag=fcntl(fd,F_GETFL,0);
+    fcntl(fd, F_SETFL, flag | O_NONBLOCK);
+}
+int main(){
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    set_nonblock(sfd);
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    bind(sfd, (struct sockaddr*)&addr, sizeof(addr));
+    listen(sfd, 10);
+    int epfd=epoll_create(0);
+    struct epoll_event EVENTS[10];
+    struct epoll_event events = {0};
+    events.events = EPOLLET;
+    events.data.fd = sfd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &events);
+    while(1){
+        int n=epoll_wait(epfd, EVENTS, 9, NULL);
+        for (int i = 0; i < n;i++){
+            if(EVENTS[i].events==EPOLLET){
+                if(EVENTS[i].data.fd==sfd){
+                    int cfd = accept(EVENTS[i].data.fd, NULL,NULL);
+                    events.events = EPOLLET | EPOLLIN;
+                    events.data.fd = cfd;
+                    epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &events);
+                }else{
+                    int n;
+                    char buf[1024];
+                    while (n = read(EVENTS[i].data.fd, buf, sizeof(buf)) > 0) {
+                        write(EVENTS[i].data.fd, buf, sizeof(buf));
+                    }
+                    if(n==0){
+                        close(EVENTS[i].data.fd);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, sfd,
+                                  &events);
+                    }
+                }
+            }
+        }
+    }
+    close(epfd);
+    close(sfd);
+    return 0;
+}
+//线程并发型服务器
+#include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <syslog.h>
+typedef struct{
+    int cfd;
+} Threaddata;
+void pthread_handle(void* arg) {
+    Threaddata* data = (Threaddata*)arg;
+    free(arg);
+    int cfd = data->cfd;
+    ssize_t numread;
+    ssize_t numsent;
+    char buf[1024];
+    while(numread=read(cfd,buf,sizeof(buf))>0){
+        if(numsent=(write(cfd,buf,sizeof(buf)))!=numread){
+            syslog(LOG_WARNING, "sent %zd bytes,expect %zd bytes\n", numsent,
+                   numread);
+            close(cfd);
+            exit(1);
+        }
+    }
+    close(cfd);
+    return NULL;
+}
+int main(){
+    int sfd=socket(AF_INET,SOCK_STREAM,0);
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    bind(sfd, (struct sockaddr*)&addr, sizeof(addr));
+    listen(sfd, 10);
+    pthread_t t1;
+    while (1) {
+        int cfd = accept(sfd, NULL, NULL);
+        Threaddata* data = (Threaddata*)malloc(sizeof(Threaddata));
+        data->cfd = cfd;
+        pthread_create(&t1, NULL, pthread_handle, data);
+    }
+    close(sfd);
     return 0;
 }

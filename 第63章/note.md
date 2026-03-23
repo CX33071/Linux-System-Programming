@@ -174,3 +174,4 @@ int pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 原理：创建一个管道，在信号处理函数中向管道写一个字节，主循环中用 select()/poll()/epoll() 监控管道读端，将信号转换为 I/O 事件
 6.总结：I/O 多路复用：select/poll 是 POSIX 标准，适合少量连接；epoll 是 Linux 高性能方案，适合海量连接。
 信号驱动 I/O：异步通知，但信号不可靠，需配合 self-pipe 等技巧
+守护进程、竞态
