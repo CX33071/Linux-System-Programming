@@ -25,8 +25,8 @@ int main(){
     }
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;//IPv4
-    addr.sin_port = htons(8080);//端口8080,转网络字节序
-    addr.sin_addr.s_addr = INADDR_ANY;//监听所有网卡
+    addr.sin_port = htons(8080);//端口8080,转网络字节序,htonl用于IPV4地址转网络字节序
+    addr.sin_addr.s_addr = INADDR_ANY;//IP地址，监听所有网卡
     if(bind(socketfd,(struct sockaddr*)&addr,sizeof(addr))==-1){
         perror("bind failed");
         close(socketfd);

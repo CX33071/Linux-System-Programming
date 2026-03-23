@@ -119,7 +119,7 @@ recvfrom和sendto是 UDP（数据报套接字）的核心收发函数 ——recv
     未调用connect：必须用sendto(sfd, data, len, 0, &servaddr, sizeof(servaddr))，显式指定服务端地址；
     调用connect后：直接用write(sfd, data, len)，数据会自动发往connect绑定的服务端地址。
 13.inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));这步是干什么的
-把 sa 指向的 sockaddr_in 结构体里的二进制 IPv4 地址（比如 0x0100007F），转换成如 "127.0.0.1" 这样的字符串，并存到 ip 缓冲区中。
+把 sa 指向的 sockaddr_in 结构体里的二进制 IPv4 地址（比如 0x0100007F），转换成如 "127.0.0.1" 这样的字符串，并存到 ip 缓冲区中。通常用的都是二进制IP地址，字符串只供人类读，打印IP地址时也要转换为字符串
 14.地址结构
 基类    struct sockaddr
 UNIX    struct sockaddr_un

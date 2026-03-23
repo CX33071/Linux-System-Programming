@@ -149,7 +149,7 @@ void handleRequest(int sfd){
 int main(){
     signal(SIGCHLD, handlesig);
     int sfd, cfd;
-    struct sockaddr_storage addr;
+    struct sockaddr_storage addr;//兼容IPV4和IPV6地址
     sfd = socket(AF_INET, SOCK_STREAM, 0);
     listen(sfd, BACKLOG);
     for (;;){

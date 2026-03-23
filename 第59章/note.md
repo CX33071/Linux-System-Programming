@@ -31,7 +31,7 @@ struct sockaddr_in {
 struct in_addr {
     uint32_t s_addr; // 32位 IPv4 地址（网络字节序）
 };
-IPv5地址结构：
+IPv6地址结构：
     struct sockaddr_in6 {
     sa_family_t     sin6_family;  // 地址族：AF_INET6
     in_port_t       sin6_port;    // 端口号（网络字节序）
