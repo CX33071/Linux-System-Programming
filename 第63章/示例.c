@@ -278,6 +278,7 @@ void pthread_handle(void* arg) {
     Threaddata* data = (Threaddata*)arg;
     free(arg);
     int cfd = data->cfd;
+    pthread_detach(pthread_self());//pthread_detach 标记线程为「分离状态」后，线程的资源由操作系统（内核）自动回收—— 线程执行完毕（return/pthread_exit）时，内核会立即释放该线程的所有资源（栈、寄存器、线程控制块等），无需主线程调用 pthread_join 触发回收。
     ssize_t numread;
     ssize_t numsent;
     char buf[1024];
