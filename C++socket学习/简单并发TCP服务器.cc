@@ -10,7 +10,7 @@ class Socket {
     private:
      int fd_=-1;
     public:
-    Socket(int domain,int type,int protocol=0){
+    Socket(int domain,int type,int protocol){
         fd_ = ::socket(domain, type, protocol);
     }
     ~Socket() { 
@@ -44,7 +44,7 @@ class IPv4Address {
         addr_.sin_port = htons(port);
         addr_.sin_addr.s_addr = INADDR_ANY;
      }
-     sockaddr* addr() { 
+     sockaddr* change() { 
         return reinterpret_cast<sockaddr*>(&addr_);
      }
 };
@@ -52,6 +52,7 @@ class TcpServer{
     private:
      uint16_t port_;
      Socket ServerSock_;
+     //处理单个客户端服务(这里是回显服务)
      void handleClient(int clientfd) {
          char buf[1024] = {0};
     while(1){
@@ -62,13 +63,13 @@ class TcpServer{
     }
 }
     public:
-    TcpServer(uint16_t port):port_(port),ServerSock_(AF_INET,SOCK_STREAM){
+    TcpServer(uint16_t port):port_(port),ServerSock_(AF_INET,SOCK_STREAM,0){
         if(!ServerSock_.isValid()){
             exit(1);
         }
         ServerSock_.enableReuseAddr();
         IPv4Address addr(port_);
-        ::bind(ServerSock_.fd(), addr.addr(), sizeof(addr));
+        ::bind(ServerSock_.fd(), addr.change(), sizeof(addr));
         ::listen(ServerSock_.fd(), 10);
     }
     void start(){
