@@ -52,102 +52,106 @@ class IPV4 {
 };
 class FTPClient{
     private:
-     Socket Client_;
-    public:
-    FTPClient(uint16_t port):Client_(AF_ALG,SOCK_CLOEXEC,0) { 
-        IPV4 addr_(port);
-        connect(Client_.fd(), addr_.change(), addr_.len());
-
-    }
-    int recvmessage(std::string& s) {
-        std::string ret;
-        ssize_t n;
-        for (char c : s) {
-            if (c == '\n') {
+     int cfd_;
+     std::string recvmessage() { 
+        std::string s;
+        char c;
+        while(read(cfd_,&c,1)==1){
+            s += c;
+            if(c=='\n'){
                 break;
             }
-            ret += c;
-            n++;
         }
-        return n;
-    }
-    void sendmessage(std::string& cmd) {
-        cmd += "\r\n";
-        write(Client_.fd(), cmd.c_str(), cmd.size());
-    }
-    void prasePASV(std::string& ip, std::string s, uint16_t& port) {
-        int h1, h2, h3, h4, p1, p2;
-        sscanf(s.c_str(), "entering passive mode (%d,%d,%d,%d,%d,%d)", h1, h2,
-               h3, h4, p1, p2);
-        port = p1 * 256 + p2;
-        ip += std::to_string(h1);
-        ip += '.';
-        ip += std::to_string(h2);
-        ip += '.';
-        ip += std::to_string(h3);
-        ip += '.';
-        ip += std::to_string(h4);
-    }
-    void createconnect(std::string s) {
-        std::string ip;
-        uint16_t port;
-        prasePASV(ip, s, port);
-        sockaddr_in addr_ = {};
-        addr_.sin_family = AF_INET;
-        addr_.sin_port = port;
-        inet_pton(AF_INET, ip.c_str(), &addr_.sin_addr);
-        connect(Client_.fd(), reinterpret_cast<sockaddr*>(&addr_),
-                sizeof(addr_));
-    }
-    void LIST() {}
-    void RETR(std::string file) {
+        return s;
+     }
+     void sendmessage(std::string cmd) { 
+        std::string s = cmd + "\r\n";
+        write(cfd_, s.data(), s.size());
+     }
+     void parsePASV(std::string&s,std::string&ip,int&port){
+         int h1, h2, h3, h4, p1, p2;
+         sscanf(s.c_str(), "227 entering passive mode (%d,%d,%d,%d,%d,%d)", &h1,
+                &h2, &h3, &h4, &p1, &p2);
+         ip = std::to_string(h1) + "." + std::to_string(h2) + "." +
+              std::to_string(h3) + "." + std::to_string(h4);
+         port = p1 * 256 + p2;
+     }
+     int connectdata(std::string ip,int port){
+         int fd = socket(AF_INET, SOCK_STREAM, 0);
+         sockaddr_in addr{};
+         addr.sin_family = AF_INET;
+         addr.sin_port = htons(port);
+         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+         connect(fd, (sockaddr*)&addr, sizeof(addr));
+         return fd;
+     }
 
-    }
-    void STOR() {}
-    int getfd() {
-         return Client_.fd(); 
+    public:
+     FTPClient(std::string ip,uint16_t port) {
+         cfd_ = socket(AF_INET, SOCK_STREAM, 0);
+         sockaddr_in addr{};
+         addr.sin_family = AF_INET;
+         addr.sin_port = htons(port);
+         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+         connect(cfd_, (sockaddr*)&addr,sizeof(addr));
+         std::cout << recvmessage();
+     }
+     void LIST() { 
+        sendmessage("PASV");
+        std::string s = recvmessage();
+        std::cout << s;
+        std::string ip;
+        int port;
+        parsePASV(s, ip, port);
+        int dfd = connectdata(ip, port);
+        sendmessage("LIST");
+        std::cout << recvmessage();
+        char buf[1024];
+        ssize_t n;
+        while((n=read(dfd,buf,sizeof(buf)))>0){
+            write(1, buf, n);
         }
+        close(dfd);
+        std::cout << recvmessage();
+     }
+     void RETR(std::string file) {
+             sendmessage("PASV");
+             std::string s = recvmessage();
+             std::cout << s;
+             std::string ip;
+             int port;
+             parsePASV(s, ip, port);
+             int dfd = connectdata(ip, port);
+             sendmessage("RETR " + file);
+             std::cout << recvmessage();
+             int fd =
+                 open(file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+             ssize_t n;
+             char buf[1024];
+             while ((n = read(dfd, buf, sizeof(buf))) > 0) {
+                 write(fd, buf, n);
+             }
+     }
+     void STOR(std::string file) {
+         sendmessage("PASV");
+         std::string s = recvmessage();
+         std::cout << s;
+         std::string ip;
+         int port;
+         parsePASV(s, ip, port);
+         int dfd = connectdata(ip, port);
+         sendmessage("STOR " + file);
+         std::cout << recvmessage();
+         int fd = open(file.c_str(), O_RDONLY);
+         ssize_t n;
+         char buf[1024];
+         while ((n = read(fd, buf, sizeof(buf))) > 0) {
+             write(dfd, buf, n);
+         }
+     }
 };
-int main(){
-    FTPClient Client_(2100);
-    while(1){
-        std::string s;
-        std::cin >> s;
-        if(!strcasecmp(s.c_str(),"PASV")){
-            std::string s = "PASV";
-            Client_.sendmessage(s);
-            Client_.recvmessage(s);
-            Client_.createconnect(s);
-        } else if (!strcasecmp(s.c_str(), "LIST")) {
-            std::string s = "LIST";
-            Client_.sendmessage(s);
-            ssize_t n;
-            char buf[1024] = {};
-            while ((n = Client_.recvmessage(s)) > 0) {
-                write(Client_.getfd(), buf, sizeof(buf));
-            }
-        } else if (!strcasecmp(s.c_str(), "retr")) {
-            std::string file;
-            std::cin >> file;
-            std::string cmd;
-            cmd = s;
-            cmd += ' ';
-            cmd += file;
-            ssize_t n;
-            Client_.sendmessage(cmd);
-            int fd = open(file.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
-            while((n=Client_.recvmessage(cmd))>0){
-                write(Client_.getfd(),buf,sizeof(buf))
-            }
-        } else if (!strcasecmp(s.c_str(), "STOR")) {
-            std::string file;
-            std::cin >> file;
-            std::string cmd;
-            cmd = s;
-            cmd += ' ';
-            cmd += file;
-            Client_.sendmessage(cmd);
-        }
-    }
-    return 0;
+int main() {
+    FTPClient client("127.0.0.1", 2100);
+        while (true) {}
+        return 0;
 }
