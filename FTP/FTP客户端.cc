@@ -47,10 +47,10 @@ class IPV4 {
     uint16_t getport() { return ntohs(addr.sin_port); }
 };
 class FTPClient{
-    private:
-     Socket Client_;
-     int datafd;
-     void sendmessage(std::string s) { 
+   private:
+    Socket Client_;
+    int datafd;
+    void sendmessage(std::string s) { 
         s += "\r\n";
         send(Client_.fd(), s.c_str(), s.size(),0);
      }
@@ -85,18 +85,10 @@ class FTPClient{
          port = p1 * 256 + p2;
      }
     public:
-    FTPClient(uint16_t port):Client_(AF_INET,SOCK_STREAM,0),datafd(-1){
+    FTPClient(uint16_t port,std::string ip):Client_(AF_INET,SOCK_STREAM,0),datafd(-1){
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
-        std::string ip;
-        char c;
-        while (read(Client_.fd(), &c, 1) == 1) {
-            ip += c;
-            if (c == '\n') {
-                break;
-            }
-        }
         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
         connect(Client_.fd(), (sockaddr*)&addr, sizeof(addr));
         recvmessage();
@@ -203,9 +195,9 @@ class FTPClient{
         }
     }
 };
-int main(int argc,char*argv){
-    
-    FTPClient ftpClient(2100);
+int main(int argc,char*argv[]){
+    std::string ip = argv[1];
+    FTPClient ftpClient(2100,ip);
     ftpClient.start();
     return 0;
 }

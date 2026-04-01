@@ -148,8 +148,6 @@ class Ftpserver {
          sendmessage(cfd, "226", "Upload done");
      }
      void handleclient(int cfd) {
-         std::string ip = getIP();
-         write(datafd, ip.data(), ip.size());
          int datafd=-1;
          sendmessage(cfd, "220", "FTP server ready");
          while (1) {
