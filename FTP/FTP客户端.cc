@@ -1,15 +1,11 @@
-#include <arpa/inet.h>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
 #include <iostream>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
 #include <string>
-#include <thread>
+#include <unistd.h>
+#include <sys/un.h>
 class Socket {
    private:
     int fd_ = -1;
@@ -52,23 +48,35 @@ class IPV4 {
 };
 class FTPClient{
     private:
-     int cfd_;
+     Socket Client_;
+     int datafd;
+     void sendmessage(std::string s) { 
+        s += "\r\n";
+        send(Client_.fd(), s.c_str(), s.size(),0);
+     }
      std::string recvmessage() { 
-        std::string s;
+        std::string ret;
         char c;
-        while(read(cfd_,&c,1)==1){
-            s += c;
+        while(read(Client_.fd(),&c,1)==1){
+            ret += c;
             if(c=='\n'){
                 break;
             }
         }
-        return s;
+        std::cout << ret;
+        return ret;
      }
-     void sendmessage(std::string cmd) { 
-        std::string s = cmd + "\r\n";
-        write(cfd_, s.data(), s.size());
+     int getcode(std::string s) { 
+        return std::stoi(s.substr(0, 3));
      }
-     void parsePASV(std::string&s,std::string&ip,int&port){
+     void connectdata(std::string ip, uint16_t port){       sockaddr_in addr{};
+         addr.sin_family = AF_INET;
+         addr.sin_port = htons(port);
+         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+         datafd = socket(AF_INET, SOCK_STREAM, 0);
+         connect(datafd, (sockaddr*)&addr, sizeof(addr));
+     }
+     void prasePASV(std::string& ip,int &port,std::string s){
          int h1, h2, h3, h4, p1, p2;
          sscanf(s.c_str(), "227 entering passive mode (%d,%d,%d,%d,%d,%d)", &h1,
                 &h2, &h3, &h4, &p1, &p2);
@@ -76,82 +84,127 @@ class FTPClient{
               std::to_string(h3) + "." + std::to_string(h4);
          port = p1 * 256 + p2;
      }
-     int connectdata(std::string ip,int port){
-         int fd = socket(AF_INET, SOCK_STREAM, 0);
-         sockaddr_in addr{};
-         addr.sin_family = AF_INET;
-         addr.sin_port = htons(port);
-         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
-         connect(fd, (sockaddr*)&addr, sizeof(addr));
-         return fd;
-     }
-
     public:
-     FTPClient(std::string ip,uint16_t port) {
-         cfd_ = socket(AF_INET, SOCK_STREAM, 0);
-         sockaddr_in addr{};
-         addr.sin_family = AF_INET;
-         addr.sin_port = htons(port);
-         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
-         connect(cfd_, (sockaddr*)&addr,sizeof(addr));
-         std::cout << recvmessage();
-     }
-     void LIST() { 
+    FTPClient(uint16_t port):Client_(AF_INET,SOCK_STREAM,0),datafd(-1){
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        std::string ip;
+        char c;
+        while (read(Client_.fd(), &c, 1) == 1) {
+            ip += c;
+            if (c == '\n') {
+                break;
+            }
+        }
+        inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+        connect(Client_.fd(), (sockaddr*)&addr, sizeof(addr));
+        recvmessage();
+    }
+    void PASV() { 
         sendmessage("PASV");
         std::string s = recvmessage();
-        std::cout << s;
         std::string ip;
         int port;
-        parsePASV(s, ip, port);
-        int dfd = connectdata(ip, port);
+        prasePASV(ip, port, s);
+        connectdata(ip, port);
+    }
+    void LIST() {
+        PASV();
         sendmessage("LIST");
-        std::cout << recvmessage();
-        char buf[1024];
+        std::string s=recvmessage();
+        if(getcode(s)!=150){
+            std::cerr << "LIST failed" << std::endl;
+            close(datafd);
+            datafd = -1;
+            return;
+        }
         ssize_t n;
-        while((n=read(dfd,buf,sizeof(buf)))>0){
+        char buf[1024];
+        while((n=read(datafd,buf,sizeof(buf)))>0){
             write(1, buf, n);
         }
-        close(dfd);
-        std::cout << recvmessage();
-     }
-     void RETR(std::string file) {
-             sendmessage("PASV");
-             std::string s = recvmessage();
-             std::cout << s;
-             std::string ip;
-             int port;
-             parsePASV(s, ip, port);
-             int dfd = connectdata(ip, port);
-             sendmessage("RETR " + file);
-             std::cout << recvmessage();
-             int fd =
-                 open(file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-             ssize_t n;
-             char buf[1024];
-             while ((n = read(dfd, buf, sizeof(buf))) > 0) {
-                 write(fd, buf, n);
-             }
-     }
-     void STOR(std::string file) {
-         sendmessage("PASV");
-         std::string s = recvmessage();
-         std::cout << s;
-         std::string ip;
-         int port;
-         parsePASV(s, ip, port);
-         int dfd = connectdata(ip, port);
-         sendmessage("STOR " + file);
-         std::cout << recvmessage();
-         int fd = open(file.c_str(), O_RDONLY);
-         ssize_t n;
-         char buf[1024];
-         while ((n = read(fd, buf, sizeof(buf))) > 0) {
-             write(dfd, buf, n);
-         }
-     }
+        s=recvmessage();
+        if(getcode(s)!=226){
+            std::cerr << "LIST not completed" << std::endl;
+        }
+        close(datafd);
+        datafd = -1;
+    }
+    void RETR(std::string s,std::string s2) {
+        PASV();
+        sendmessage(s);
+        s=recvmessage();
+        if (getcode(s) != 150) {
+            std::cerr << "RETR failed" << std::endl;
+            close(datafd);
+            datafd = -1;
+            return;
+        }
+        ssize_t n;
+        char buf[1024];
+        int fd = open(s2.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        while((n=read(datafd,buf,sizeof(buf)))>0){
+            write(fd, buf, n);
+        }
+        s = recvmessage();
+        if (getcode(s) != 226) {
+            std::cerr << "RETR not completed" << std::endl;
+        }
+        close(fd);
+        close(datafd);
+        datafd = -1;
+    }
+    void STOR(std::string s, std::string s2) { 
+        PASV();
+        sendmessage(s);
+        s = recvmessage();
+        if (getcode(s) != 150) {
+            std::cerr << "STOR failed" << std::endl;
+            close(datafd);
+            datafd = -1;
+            return;
+        }
+        ssize_t n;
+        char buf[1024];
+        int fd = open(s2.c_str(), O_RDONLY);
+        while((n=read(fd,buf,sizeof(buf)))>0){
+            write(datafd, buf, n);
+        }
+        close(datafd);
+        s = recvmessage();
+        if (getcode(s) != 226) {
+            std::cerr << "STOR not completed" << std::endl;
+        }
+        close(fd);
+        datafd = -1;
+    }
+    void start() { 
+        std::string s,s1,s2;
+        while(1){
+            std::getline(std::cin, s);
+            int idx = s.find(' ');
+            if(idx==std::string::npos){
+                s1 = s;
+                s2 = "";
+            }else{
+            s1 = s.substr(0, idx);
+            s2 = s.substr(idx+1);
+            }
+            if (!strcasecmp(s1.c_str(), "PASV")) {
+                PASV();
+            } else if (!strcasecmp(s1.c_str(), "LIST")) {
+                LIST();
+            } else if (!strcasecmp(s1.c_str(), "RETR")) {
+                RETR(s,s2);
+            } else if (!strcasecmp(s1.c_str(), "STOR")) {
+                STOR(s,s2);
+            }
+        }
+    }
 };
-int main() {
-    FTPClient client("127.0.0.1", 2100);
-        while (true) {}
-        return 0;
+int main(){
+    FTPClient ftpClient(2100);
+    ftpClient.start();
+    return 0;
 }

@@ -1,15 +1,15 @@
-#include <iostream>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <string>
-#include <unistd.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <iostream>
+#include <string>
 #include <thread>
-#include <errno.h>
-#include <arpa/inet.h>
-#include <dirent.h>
 class Socket{
     private:
      int fd_=-1;
@@ -61,6 +61,22 @@ class Ftpserver {
     private:
      uint16_t port_;
      Socket listensock_;
+     int datafd;
+     std::string readline(int fd) {
+         std::string line;
+         char c;
+         while (1) {
+             ssize_t n = read(fd, &c, 1);
+             if (n <= 0) {
+                 break;
+             }
+             line += c;
+             if (c == '\n') {
+                 break;
+             }
+         }
+         return line;
+     }
      std::string getIP() { 
         struct ifaddrs* ifap = nullptr;
         getifaddrs(&ifap);
@@ -108,13 +124,9 @@ class Ftpserver {
         return port;
      }
      void LIST(int cfd,int datafd){
-         if (datafd == -1) {
-             sendmessage(cfd, "425", "Use PASV first");
-             return;
-         }
          int dfd = accept(datafd, nullptr, nullptr);
          close(datafd);
-         sendmessage(cfd, "150", "Opening data connection");
+         sendmessage(cfd, "150", "List");
          DIR* dir = opendir(".");
          struct dirent* ent;
          while(ent=readdir(dir)){
@@ -124,22 +136,18 @@ class Ftpserver {
          }
          closedir(dir);
          close(dfd);
-         sendmessage(cfd, "226", "Transfer done");
+         sendmessage(cfd, "226", "List done");
      }
      void RETR(int cfd,int datafd,std::string s){
-         if (datafd == -1) {
-             sendmessage(cfd, "425", "Use PASV first");
-             return;
-         }
          int dfd = accept(datafd, nullptr, nullptr);
          close(datafd);
-         sendmessage(cfd, "150", "Sending file");
          int fd = open(s.data(), O_RDONLY);
          if(fd==-1){
              sendmessage(cfd, "550", "File not found");
              close(dfd);
              return;
          }
+         sendmessage(cfd, "150", "Send file");
          char buf[1024];
          ssize_t n;
          while((n=read(fd,buf,sizeof(buf)))>0){
@@ -147,16 +155,12 @@ class Ftpserver {
          }
          close(fd);
          close(dfd);
-         sendmessage(cfd, "226", "Download complete");
+         sendmessage(cfd, "226", "Download done");
      }
      void STOR(int cfd,int datafd,std::string s){
-         if (datafd == -1) {
-             sendmessage(cfd, "425", "Use PASV first");
-             return;
-         }
          int dfd = accept(datafd, nullptr, nullptr);
          close(datafd);
-         sendmessage(cfd, "150", "Receiving file");
+         sendmessage(cfd, "150", "Receive file");
          int fd = open(s.data(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
          char buf[1024];
          ssize_t n;
@@ -165,18 +169,16 @@ class Ftpserver {
          }
          close(fd);
          close(dfd);
-         sendmessage(cfd, "226", "Upload complete");
+         sendmessage(cfd, "226", "Upload done");
      }
      void handleclient(int cfd) {
          int datafd=-1;
          sendmessage(cfd, "220", "FTP server ready");
          while (1) {
-             std::string s(1024, '\0');
-             ssize_t n = read(cfd, s.data(), s.size() - 1);
-             if (n <= 0) {
+             std::string s = readline(cfd);
+             if(s.empty()){
                  break;
              }
-             s.resize(n);
              std::string s1, s2;
              size_t space = s.find(' ');
              if(!s.empty()&&s.back()=='\n'){
@@ -199,7 +201,7 @@ class Ftpserver {
                  int p2 = port % 256;
                  char buf[1024];
                  std::string ip = getIP();
-                 std::string s = "Entering Passive Mode (";
+                 std::string s = "entering passive mode (";
                  s += ip;
                  s += ',';
                  s += std::to_string(p1);
@@ -227,6 +229,8 @@ class Ftpserver {
             int cfd = accept(listensock_.fd(), nullptr, nullptr);
             std::thread t(&Ftpserver::handleclient, this, cfd);
             t.detach();
+            std::string ip = getIP();
+            write(datafd, ip.data(), ip.size());
         }
     }
 };
