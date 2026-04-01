@@ -77,33 +77,9 @@ class Ftpserver {
          }
          return line;
      }
-     std::string getIP() { 
-        struct ifaddrs* ifap = nullptr;
-        getifaddrs(&ifap);
-        std::string s = "127,0,0,1";
-        for (auto ifa = ifap;ifa!=nullptr;ifa=ifa->ifa_next){
-            if(!ifa->ifa_addr){
-                continue;
-            }
-            if(ifa->ifa_addr->sa_family!=AF_INET){
-                continue;
-            }
-            auto addr = reinterpret_cast<sockaddr_in*>(ifa->ifa_addr);
-            char buf[100]{};
-            inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf));
-            if(std::string(buf).substr(0,3)=="127"){
-                continue;
-            }
-            for(char&c:buf){
-                if (c == '.') {
-                    c = ',';
-                }
-            }
-            s = buf;
-            break;
-        }
-        freeifaddrs(ifap);
-        return s;
+     std::string getIP() {
+         std::string s = "10.30.0.166";
+         return s;
      }
      void sendmessage(int fd, std::string num, std::string s) {
          std::string message;
@@ -172,8 +148,6 @@ class Ftpserver {
          sendmessage(cfd, "226", "Upload done");
      }
      void handleclient(int cfd) {
-         std::string ip = getIP();
-         write(datafd, ip.data(), ip.size());
          int datafd=-1;
          sendmessage(cfd, "220", "FTP server ready");
          while (1) {

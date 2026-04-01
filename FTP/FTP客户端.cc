@@ -203,7 +203,8 @@ class FTPClient{
         }
     }
 };
-int main(){
+int main(int argc,char*argv){
+    
     FTPClient ftpClient(2100);
     ftpClient.start();
     return 0;
