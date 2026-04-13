@@ -85,15 +85,14 @@ uint16_t IPV4::getport() {
 
 
 
-
 class Ftpserver {
    private:
     uint16_t port_;
     Socket listensock_;
     std::string readline(int fd);
-    std::string getIP();
+    std::string getIP(IPV4 addr);
     void sendmessage(int fd, std::string num, std::string s);
-    int createPASVsocket(int& datafd);
+    int createPASVsocket(int& datafd,IPV4 &addr);
     void LIST(int cfd, int datafd);
     void RETR(int cfd, int datafd, std::string s);
     void STOR(int cfd, int datafd, std::string s);
@@ -120,9 +119,11 @@ std::string Ftpserver::readline(int fd) {
     }
     return line;
 }
-std::string Ftpserver::getIP() {
-    std::string s = "10.30.0.166";
-    return s;
+std::string Ftpserver::getIP(IPV4 addr) {
+    socklen_t len = addr.len();
+    if (getsockname(listensock_.fd(), addr.change(), &len)) {
+        
+    }
 }
 void Ftpserver::sendmessage(int fd, std::string num, std::string s) {
     std::string message;
@@ -132,9 +133,8 @@ void Ftpserver::sendmessage(int fd, std::string num, std::string s) {
     message += "\r\n";
     write(fd, message.data(), message.size());
 }
-int Ftpserver::createPASVsocket(int& datafd) {
+int Ftpserver::createPASVsocket(int& datafd,IPV4 &addr) {
     datafd = socket(AF_INET, SOCK_STREAM, 0);
-    IPV4 addr(0);
     bind(datafd, addr.change(), addr.len());
     listen(datafd, 1);
     socklen_t len = addr.len();
@@ -144,7 +144,6 @@ int Ftpserver::createPASVsocket(int& datafd) {
 }
 void Ftpserver::LIST(int cfd, int datafd) {
     int dfd = accept(datafd, nullptr, nullptr);
-    close(datafd);
     sendmessage(cfd, "150", "List");
     DIR* dir = opendir(".");
     struct dirent* ent;
@@ -156,10 +155,11 @@ void Ftpserver::LIST(int cfd, int datafd) {
     closedir(dir);
     close(dfd);
     sendmessage(cfd, "226", "List done");
+    close(datafd);
+    datafd = -1;
 }
 void Ftpserver::RETR(int cfd, int datafd, std::string s) {
     int dfd = accept(datafd, nullptr, nullptr);
-    close(datafd);
     int fd = open(s.data(), O_RDONLY);
     if (fd == -1) {
         sendmessage(cfd, "550", "File not found");
@@ -175,10 +175,11 @@ void Ftpserver::RETR(int cfd, int datafd, std::string s) {
     close(fd);
     close(dfd);
     sendmessage(cfd, "226", "Download done");
+    close(datafd);
+    datafd = -1;
 }
 void Ftpserver::STOR(int cfd, int datafd, std::string s) {
     int dfd = accept(datafd, nullptr, nullptr);
-    close(datafd);
     sendmessage(cfd, "150", "Receive file");
     int fd = open(s.data(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     char buf[1024];
@@ -189,6 +190,8 @@ void Ftpserver::STOR(int cfd, int datafd, std::string s) {
     close(fd);
     close(dfd);
     sendmessage(cfd, "226", "Upload done");
+    close(datafd);
+    datafd = -1;
 }
 void Ftpserver::handleclient(int cfd) {
     int datafd = -1;
@@ -223,11 +226,12 @@ void Ftpserver::handleclient(int cfd) {
             s2 = s.substr(space + 1);
         }
         if (!strcasecmp(s1.c_str(), "pasv")) {
-            int port = createPASVsocket(datafd);
+            IPV4 addr(0);
+            int port = createPASVsocket(datafd,addr);
             int p1 = port / 256;
             int p2 = port % 256;
             char buf[1024];
-            std::string ip = getIP();
+            std::string ip = getIP(addr);
             std::string s = "entering passive mode (";
             s += ip;
             s += ',';
@@ -236,8 +240,8 @@ void Ftpserver::handleclient(int cfd) {
             s += std::to_string(p2);
             s += ')';
             sendmessage(cfd, "227", s);
-            std::string ret = "主动模式已开启";
-            write(cfd, ret.data(), ret.size());
+            // std::string ret = "主动模式已开启";
+            // std::cout << ret;
         } else if (!strcasecmp(s1.c_str(), "list")) {
             LIST(cfd, datafd);
         } else if (!strcasecmp(s1.c_str(), "retr")) {
@@ -257,8 +261,8 @@ Ftpserver::Ftpserver(uint16_t port)
     std::cout << "服务端已开启" << std::endl;
     while (1) {
         int cfd = accept(listensock_.fd(), nullptr, nullptr);
-        std::string ret = "有一个客户端连接成功";
-        write(cfd, ret.c_str(), ret.size());
+        // std::string ret = "有一个客户端连接成功";
+        // std::cout << ret;
         std::thread t(&Ftpserver::handleclient, this, cfd);
         t.detach();
     }
