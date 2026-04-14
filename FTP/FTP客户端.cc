@@ -80,7 +80,7 @@ class FTPClient{
     int getcode(std::string s);
     void connectdata(std::string ip, uint16_t port);
     void prasePASV(std::string& ip, int& port, std::string s);
-    std::string getip();
+    std::string getip(sockaddr_in addr);
    public:
     FTPClient(uint16_t port,std::string ip);
     void PASV();
@@ -91,25 +91,13 @@ class FTPClient{
 };
 
 
-std::string FTPClient::getip(){
-    struct ifaddrs *ifap, *ifa;
-    std::string ip;
-    if(getifaddrs(&ifap)==-1){
-        std::string ret = "getip failed";
-        return ret;
-    }
-    getifaddrs(&ifap);
-    for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == NULL) {
-            continue;
-        }
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            struct sockaddr_in* sa = (struct sockaddr_in*)ifa->ifa_addr;
-            inet_ntop(AF_INET, &sa->sin_addr, ip.data(), sizeof(ip));
-        }
-    }
-    freeifaddrs(ifap);
-    return ip;
+std::string FTPClient::getip(sockaddr_in addr){
+    char ip[100];
+    socklen_t len = sizeof(addr);
+    getsockname(Client_.fd(),(sockaddr*)&addr,&len);
+    inet_ntop(AF_INET, &addr, ip, sizeof(ip));
+    std::string ret = ip;
+    return ret;
 }
 void FTPClient::sendmessage(std::string s) {
     s += "\r\n";
@@ -153,11 +141,14 @@ FTPClient::FTPClient(uint16_t port, std::string ip)
     addr.sin_port = htons(port);
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr.s_addr);
     connect(Client_.fd(), (sockaddr*)&addr, sizeof(addr));
+    std::string IP = getip(addr);
+    sendmessage(IP);
     recvmessage();
 }
 void FTPClient::PASV() {
     sendmessage("PASV");
     std::string s = recvmessage();
+    std::cout << s;
     std::string ip;
     int port;
     prasePASV(ip, port, s);
@@ -240,9 +231,43 @@ void FTPClient::STOR(std::string s, std::string s2) {
     datafd = -1;
 }
 void FTPClient::start() {
-    std::string s, s1, s2;
+    std::string s, s1, s2, ret;
+    std::cout << "注册L/登录S:";
+    std::string c;
+    std::cin >> c;
+    sendmessage(c);
+    if (c == "L") {
+        std::cout << "请输入用户名:";
+        std::string name;
+        std::cin >> name;
+        sendmessage(name);
+        std::cout << "请输入密码:";
+        std::string pass;
+        std::cin >> pass;
+        sendmessage(pass);
+        std::cout << "注册成功，请开始你的操作！\n";
+    } else {
+        std::cout << "请输入用户名:";
+        while (ret != "请输入密码\n") {
+            s1 = "USER";
+            std::cin >> s;
+            s1 += s;
+            sendmessage(s1);
+            ret = recvmessage();
+        }
+        std::cout << "请输入密码:";
+        while (ret != "成功登录\n") {
+            s2 = "PASS";
+            std::cin >> s;
+            s2 += s;
+            sendmessage(s2);
+            ret = recvmessage();
+        }
+    }
     while (1) {
-        std::getline(std::cin, s);
+        std::cout << "123";
+        std::cin >> s;
+        std::cout << "123";
         int idx = s.find(' ');
         if (idx == std::string::npos) {
             s1 = s;
@@ -259,6 +284,8 @@ void FTPClient::start() {
             RETR(s1, s2);
         } else if (!strcasecmp(s1.c_str(), "STOR")) {
             STOR(s1, s2);
+        } else {
+            std::cout << "命令错误\n";
         }
     }
 }
