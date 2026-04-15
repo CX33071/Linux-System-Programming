@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <iostream>
 #include <string>
+#include <limits>
 class Socket {
    private:
     int fd_ = -1;
@@ -112,7 +113,6 @@ std::string FTPClient::recvmessage() {
             break;
         }
     }
-    std::cout << ret;
     return ret;
 }
 int FTPClient::getcode(std::string s) {
@@ -143,9 +143,11 @@ FTPClient::FTPClient(uint16_t port, std::string ip)
     connect(Client_.fd(), (sockaddr*)&addr, sizeof(addr));
     std::string IP = getip(addr);
     sendmessage(IP);
-    recvmessage();
+    std::string ret=recvmessage();
+    std::cout << ret;
 }
 void FTPClient::PASV() {
+    std::cout << "123";
     sendmessage("PASV");
     std::string s = recvmessage();
     std::cout << s;
@@ -230,6 +232,9 @@ void FTPClient::STOR(std::string s, std::string s2) {
     close(fd);
     datafd = -1;
 }
+
+//如何记录注册的章好和密码
+//为什么while(1)里std::cin>>s不能输入
 void FTPClient::start() {
     std::string s, s1, s2, ret;
     std::cout << "注册L/登录S:";
@@ -248,12 +253,13 @@ void FTPClient::start() {
         std::cout << "注册成功，请开始你的操作！\n";
     } else {
         std::cout << "请输入用户名:";
-        while (ret != "请输入密码\n") {
+        while (ret != "请输入密码:\n") {
             s1 = "USER";
             std::cin >> s;
             s1 += s;
             sendmessage(s1);
             ret = recvmessage();
+            std::cout << ret;
         }
         std::cout << "请输入密码:";
         while (ret != "成功登录\n") {
@@ -262,21 +268,25 @@ void FTPClient::start() {
             s2 += s;
             sendmessage(s2);
             ret = recvmessage();
+            std::cout << ret << '\n';
         }
     }
     while (1) {
-        std::cout << "123";
-        std::cin >> s;
-        std::cout << "123";
-        int idx = s.find(' ');
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        std::string cmd;
+        if(!std::getline(std::cin, cmd)){
+            break;
+        }
+        int idx = cmd.find(' ');
         if (idx == std::string::npos) {
-            s1 = s;
+            s1 = cmd;
             s2 = "";
         } else {
-            s1 = s.substr(0, idx);
-            s2 = s.substr(idx + 1);
+            s1 = cmd.substr(0, idx);
+            s2 = cmd.substr(idx + 1);
         }
         if (!strcasecmp(s1.c_str(), "PASV")) {
+            std::cout << "5";
             PASV();
         } else if (!strcasecmp(s1.c_str(), "LIST")) {
             LIST();
