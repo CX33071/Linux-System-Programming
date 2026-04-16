@@ -86,16 +86,9 @@ void FTPClient::start() {
 
     std::cout << "可用命令:PASV | LIST | RETR | STOR | QUIT\n";
     std::string line;
-    while (true) {
+    while (1) {
         std::cout << "ftp: " << std::flush;
-        if (!std::getline(std::cin, line)) {
-            break;
-        }
-        line = getlineok(line);
-        if (line.empty()) {
-            continue;
-        }
-
+        std::getline(std::cin, line);
         std::string cmd;
         std::string rest;
          size_t pos = line.find(' ');
@@ -105,22 +98,18 @@ void FTPClient::start() {
             cmd = line.substr(0, pos);
             rest = line.substr(pos + 1);
         }
-        for (char& ch : cmd) {
-            ch = static_cast<char>(::toupper(static_cast<unsigned char>(ch)));
-        }
-
-        if (cmd == "PASV") {
+        if (!strcasecmp(cmd.c_str(),"PASV")) {
             int datafd = PASV();
             if (datafd != -1) {
                 close(datafd);
             }
-        } else if (cmd == "LIST") {
+        } else if (!strcasecmp(cmd.c_str(),"LIST")) {
             LIST();
-        } else if (cmd == "RETR") {
+        } else if (!strcasecmp(cmd.c_str(),"RETR")) {
             RETR(rest);
-        } else if (cmd == "STOR") {
+        } else if (!strcasecmp(cmd.c_str(),"STOR")) {
             STOR(rest);
-        } else if (cmd == "QUIT") {
+        } else if (!strcasecmp(cmd.c_str(),"QUIT")) {
             sendmessage("QUIT");
             std::cout << readline(Client_.fd()) << '\n';
             break;
@@ -165,10 +154,10 @@ void FTPClient::LIST() {
         return;
     }
 
-    char buf[4096];
+    char buf[100];
     ssize_t n = 0;
     while ((n = recv(datafd, buf, sizeof(buf), 0)) > 0) {
-        std::cout.write(buf, n);
+        write(1, buf, n);
     }
     close(datafd);
 
@@ -190,11 +179,6 @@ void FTPClient::RETR( std::string args) {
 
     int fd = open(local.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     int datafd = PASV();
-    if (datafd == -1) {
-        close(fd);
-        return;
-    }
-
     sendmessage("RETR " + remote);
     std::string resp = readline(Client_.fd());
     std::cout << resp << '\n';
@@ -204,10 +188,10 @@ void FTPClient::RETR( std::string args) {
         return;
     }
 
-    char buf[4096];
+    char buf[100];
     ssize_t n = 0;
     while ((n = recv(datafd, buf, sizeof(buf), 0)) > 0) {
-        write(fd, buf, static_cast<size_t>(n)) ;
+        write(fd, buf,n) ;
 
     close(fd);
     close(datafd);
@@ -237,11 +221,6 @@ void FTPClient::STOR( std::string args) {
     }
 
     int datafd = PASV();
-    if (datafd == -1) {
-        close(fd);
-        return;
-    }
-
     sendmessage("STOR " + remote);
     std::string resp = readline(Client_.fd());
     std::cout << resp << '\n';
@@ -259,9 +238,7 @@ void FTPClient::STOR( std::string args) {
             return;
         };
     }
-
     close(fd);
-    shutdown(datafd, SHUT_WR);
     close(datafd);
     resp = readline(Client_.fd());
     std::cout << resp << '\n';
@@ -329,7 +306,7 @@ bool FTPClient::prasePASV( std::string resp, std::string& ip, int& port)  {
 }
 
 std::string FTPClient::getfilename( std::string& path)  {
-     size_t pos = path.find_last_of("/\\");
+     size_t pos = path.find_last_of("/");
     return pos == std::string::npos ? path : path.substr(pos + 1);
 }
 

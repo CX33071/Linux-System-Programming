@@ -117,23 +117,22 @@ uint16_t IPV4::getport() {
 
 Ftpserver::Ftpserver(uint16_t port) : port_(port), listensock_(AF_INET, SOCK_STREAM, 0) {
     zhanghao["ftp"] = "123456";
-    zhanghao["test"] = "test";
 }
 
 void Ftpserver::run() {
-    // if (!listensock_.isvalid()) {
-    //     std::perror("socket");
-    //     return;
-    // }
-    // if (!listensock_.enableport()) {
-    //     std::perror("setsockopt");
-    //     return;
-    // }
+    if (!listensock_.isvalid()) {
+        std::perror("socket");
+        return;
+    }
+    if (!listensock_.enableport()) {
+        std::perror("setsockopt");
+        return;
+    }
 
     IPV4 addr(port_);
     bind(listensock_.fd(), addr.change(), addr.len()) ;
     listen(listensock_.fd(), 16);
-    std::cout << "FTP server listening on port " << port_ << '\n';
+    std::cout << "ftp server listen" << port_ << '\n';
     while (true) {
         int cfd = accept(listensock_.fd(), nullptr, nullptr);
         std::cout << "有一个客户端成功连接\n";
@@ -143,9 +142,9 @@ void Ftpserver::run() {
 
 void Ftpserver::handleclient(int cfd) {
     Client client;
-    sendmessage(cfd, 220, "Simple FTP server ready");
+    sendmessage(cfd, 220, "ftp server ready");
 
-    while (true) {
+    while (1) {
         std::string s = readline(cfd);
         std::string cmd;
         std::string arg;
@@ -156,29 +155,25 @@ void Ftpserver::handleclient(int cfd) {
             cmd = s.substr(0, pos);
             arg = s.substr(pos + 1);
         }
-        for (char& ch : cmd) {
-            ch = static_cast<char>(::toupper(static_cast<unsigned char>(ch)));
-        }
-
         if (cmd == "USER") {
             USER(cfd, client, arg);
         } else if (cmd == "PASS") {
             PASS(cfd, client, arg);
         } else if (cmd == "QUIT") {
-            sendmessage(cfd, 221, "Bye");
+            sendmessage(cfd, 221, "bye bye");
             break;
         } else if (!client.islogin) {
-            sendmessage(cfd, 530, "Please login with USER and PASS");
-        } else if (cmd == "PASV") {
+            sendmessage(cfd, 530, "login first");
+        } else if (!strcasecmp(cmd.c_str(),"PASV")) {
             PASV(cfd, client);
-        } else if (cmd == "LIST") {
+        } else if (!strcasecmp(cmd.c_str(),"LIST")) {
             LIST(cfd, client);
-        } else if (cmd == "RETR") {
+        } else if (!strcasecmp(cmd.c_str(),"RETR")) {
             RETR(cfd, client, arg);
-        } else if (cmd == "STOR") {
+        } else if (!strcasecmp(cmd.c_str(),"STOR")) {
             STOR(cfd, client, arg);
         } else {
-            sendmessage(cfd, 502, "Command not implemented");
+            sendmessage(cfd, 502, "command errno");
         }
     }
 
@@ -188,41 +183,39 @@ void Ftpserver::handleclient(int cfd) {
 
 void Ftpserver::USER(int cfd, Client& client,std::string& user) {
     if (user.empty()) {
-        sendmessage(cfd, 501, "Missing username");
+        sendmessage(cfd, 501, "username");
         return;
     }
-    // std::lock_guard<std::mutex> lock(users_mutex_);
     if (zhanghao.count(user) == 0) {
-        sendmessage(cfd, 530, "Invalid username");
+        sendmessage(cfd, 530, "username exist");
         return;
     }
     client.username = user;
     client.hasuser = true;
     client.islogin = false;
-    sendmessage(cfd, 331, "User name okay, need password");
+    sendmessage(cfd, 331, "need password");
 }
 
 void Ftpserver::PASS(int cfd, Client& client,std::string& pass) {
     if (!client.hasuser) {
-        sendmessage(cfd, 503, "Send USER first");
+        sendmessage(cfd, 503, "need username");
         return;
     }
-    // std::lock_guard<std::mutex> lock(users_mutex_);
     auto it = zhanghao.find(client.username);
     if (it == zhanghao.end() || it->second != pass) {
-        sendmessage(cfd, 530, "Login incorrect");
+        sendmessage(cfd, 530, "password errno");
         return;
     }
     client.islogin = true;
-    sendmessage(cfd, 230, "Login successful");
+    sendmessage(cfd, 230, "login succeful");
 }
 
 void Ftpserver::PASV(int cfd, Client& client) {
     closePASV(client);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    // int opt = 1;
-    // setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     IPV4 addr(0);
 
@@ -256,20 +249,20 @@ int Ftpserver::acceptdata(Client& client) {
 
 void Ftpserver::LIST(int cfd, Client& client) {
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "Use PASV first");
+        sendmessage(cfd, 425, "need pasv first");
         return;
     }
-    sendmessage(cfd, 150, "Opening data connection for LIST");
+    sendmessage(cfd, 150, "open data connection for list");
     int datafd = acceptdata(client);
     if (datafd == -1) {
-        sendmessage(cfd, 425, "Data connection failed");
+        sendmessage(cfd, 425, "data connect failed");
         return;
     }
 
     DIR* dir = opendir(".");
     if (dir == nullptr) {
         close(datafd);
-        sendmessage(cfd, 550, "Failed to open directory");
+        sendmessage(cfd, 550, "open dir failed");
         return;
     }
 
@@ -282,30 +275,30 @@ void Ftpserver::LIST(int cfd, Client& client) {
     }
     closedir(dir);
     close(datafd);
-    sendmessage(cfd, 226, "LIST complete");
+    sendmessage(cfd, 226, "list complete");
 }
 
 void Ftpserver::RETR(int cfd, Client& client,std::string& path) {
     if (path.empty()) {
-        sendmessage(cfd, 501, "Missing file name");
+        sendmessage(cfd, 501, "need file name");
         return;
     }
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "Use PASV first");
+        sendmessage(cfd, 425, "need pasv first");
         return;
     }
 
     int fd = open(path.c_str(), O_RDONLY);
     if (fd == -1) {
-        sendmessage(cfd, 550, "File not found");
+        sendmessage(cfd, 550, "file not found");
         return;
     }
 
-    sendmessage(cfd, 150, "Opening data connection for RETR");
+    sendmessage(cfd, 150, "open data connect for retr");
     int datafd = acceptdata(client);
     if (datafd == -1) {
         close(fd);
-        sendmessage(cfd, 425, "Data connection failed");
+        sendmessage(cfd, 425, "data connect failed");
         return;
     }
 
@@ -321,30 +314,31 @@ void Ftpserver::RETR(int cfd, Client& client,std::string& path) {
 
     close(fd);
     close(datafd);
-    sendmessage(cfd, ok ? 226 : 426, ok ? "RETR complete" : "Connection closed; transfer aborted");
+    int num = ok ? 226 : 426;
+    sendmessage(cfd, num, ok ? "retr complete" : "connect close");
 }
 
 void Ftpserver::STOR(int cfd, Client& client,std::string& path) {
     if (path.empty()) {
-        sendmessage(cfd, 501, "Missing file name");
+        sendmessage(cfd, 501, "need file name");
         return;
     }
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "Use PASV first");
+        sendmessage(cfd, 425, "need pasv first");
         return;
     }
 
     int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
-        sendmessage(cfd, 550, "Cannot create file");
+        sendmessage(cfd, 550, "create file failed");
         return;
     }
 
-    sendmessage(cfd, 150, "Opening data connection for STOR");
+    sendmessage(cfd, 150, "open data connect for stor");
     int datafd = acceptdata(client);
     if (datafd == -1) {
         close(fd);
-        sendmessage(cfd, 425, "Data connection failed");
+        sendmessage(cfd, 425, "data connect failed");
         return;
     }
 
@@ -360,7 +354,9 @@ void Ftpserver::STOR(int cfd, Client& client,std::string& path) {
 
     close(fd);
     close(datafd);
-    sendmessage(cfd, ok ? 226 : 426, ok ? "STOR complete" : "Connection closed; transfer aborted");
+    int num = ok ? 226 : 426;
+    sendmessage(cfd, num,
+                ok ? "stor complete" : "connect close");
 }
 
 void Ftpserver::closePASV(Client& client){
