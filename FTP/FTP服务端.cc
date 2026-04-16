@@ -147,10 +147,6 @@ void Ftpserver::handleclient(int cfd) {
 
     while (true) {
         std::string s = readline(cfd);
-        // if (s.empty()) {
-        //     break;
-        // }
-
         std::string cmd;
         std::string arg;
         size_t pos = s.find(' ');
