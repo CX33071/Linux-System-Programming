@@ -61,7 +61,7 @@ class Ftpserver {
 
     uint16_t port_;
     Socket listensock_;
-    std::map<std::string, std::string> zhanghao;
+    std::map<std::string, std::string> account;
     std::mutex users_mutex_;
 };
 
@@ -116,7 +116,7 @@ uint16_t IPV4::getport() {
 }
 
 Ftpserver::Ftpserver(uint16_t port) : port_(port), listensock_(AF_INET, SOCK_STREAM, 0) {
-    zhanghao["ftp"] = "123456";
+    account["ftp"] = "123456";
 }
 
 void Ftpserver::run() {
@@ -186,7 +186,7 @@ void Ftpserver::USER(int cfd, Client& client,std::string& user) {
         sendmessage(cfd, 501, "username");
         return;
     }
-    if (zhanghao.count(user) == 0) {
+    if (account.count(user) == 0) {
         sendmessage(cfd, 530, "username exist");
         return;
     }
@@ -201,8 +201,8 @@ void Ftpserver::PASS(int cfd, Client& client,std::string& pass) {
         sendmessage(cfd, 503, "need username");
         return;
     }
-    auto it = zhanghao.find(client.username);
-    if (it == zhanghao.end() || it->second != pass) {
+    auto it = account.find(client.username);
+    if (it == account.end() || it->second != pass) {
         sendmessage(cfd, 530, "password errno");
         return;
     }
