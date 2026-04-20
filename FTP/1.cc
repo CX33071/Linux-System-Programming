@@ -7,100 +7,202 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <atomic>
+#include <condition_variable>
+#include <cstring>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <vector>
+#define MAX_SIZE 100
 
-
-
-
-struct Client {
-    std::string recv_buffer;    // 接收缓冲区
-    std::string send_buffer;    // 发送缓冲区
-    bool send_pending = false;  // 是否有数据待发送
-};
-
-class ThreadPool {
+class Socket {
    public:
-    ThreadPool(size_t num_threads);
-    ~ThreadPool();
-
-    template <typename F>
-    void submit(F&& f);
+    Socket(int domain, int type, int protocol);
+    ~Socket();
+    int fd();
+    bool isvalid();
+    bool enableport();
 
    private:
-    std::vector<std::thread> workers_;
+    int fd_ = -1;
+};
+
+class IPV4 {
+   public:
+    IPV4(uint16_t port);
+    sockaddr* change();
+    socklen_t len();
+    uint16_t getport();
+
+   private:
+    sockaddr_in addr_{};
+};
+
+struct Client {
+    bool hasuser = false;
+    bool islogin = false;
+    std::string username;
+    int pasvfd = -1;
+    std::string readbuf;
+    std::string writebuf;
+};
+
+class Threadpool {
+   public:
+    Threadpool(size_t num = std::thread::hardware_concurrency());
+    ~Threadpool();
+    void addtask(std::function<void()> task);
+
+   private:
+    void work();
+
+    bool stop_ = false;
+    std::mutex mutex_;
+    std::condition_variable cond_;
     std::queue<std::function<void()>> tasks_;
-    std::mutex queue_mutex_;
-    std::condition_variable condition_;
-    bool stop_;
+    std::vector<std::thread> threads_;
 };
 
 class ftpepollserver {
+   public:
+    ftpepollserver(uint16_t port);
+    ~ftpepollserver();
+    void run();
+
    private:
-    void handle_read(int cfd);
-    void handle_write(int cfd);
-    void process_command(int cfd);
+    void handle_read(int fd);
+    void handle_write(int fd);
+    void add_epoll(int fd, uint32_t events);
+    void del_epoll(int fd, uint32_t events);
     void mod_epoll(int fd, uint32_t events);
-    std::map<int, Client> clients_;
-    std::mutex clients_mutex_;
-    int epfd_;
-    ThreadPool thread_pool_;
-    std::atomic<bool> running_;
+    void USER(int cfd, Client& client, std::string& user);
+    void PASS(int cfd, Client& client, std::string& pass);
+    void PASV(int cfd, Client& client);
+    int acceptdata(Client& client);
+    void LIST(int cfd, Client& client);
+    void RETR(int cfd, Client& client, std::string& path);
+    void STOR(int cfd, Client& client, std::string& path);
+    void closePASV(Client& client);
+
+    uint16_t port_;
+    Socket listensock_;
+    int epfd;
+    Threadpool pool;
+    std::map<int, Client> clients;
+    std::map<std::string, std::string> account;
+    std::mutex clients_mutex_;  // 添加mutex保护clients
 };
-// ThreadPool 实现
-ThreadPool::ThreadPool(size_t num_threads) : stop_(false) {
-    for (size_t i = 0; i < num_threads; ++i) {
-        workers_.emplace_back([this] {
-            while (true) {
-                std::function<void()> task;
-                {
-                    std::unique_lock<std::mutex> lock(this->queue_mutex_);
-                    this->condition_.wait(lock, [this] {
-                        return this->stop_ || !this->tasks_.empty();
-                    });
-                    if (this->stop_ && this->tasks_.empty())
-                        return;
-                    task = std::move(this->tasks_.front());
-                    this->tasks_.pop();
-                }
-                task();
-            }
-        });
+
+std::string getlineok(std::string line);
+bool sendn(int fd, char* data, size_t len);
+bool sendstr(int fd, std::string& text);
+void set_nonblock(int fd);
+void set_block(int fd);
+
+Socket::Socket(int domain, int type, int protocol)
+    : fd_(socket(domain, type, protocol)) {}
+
+Socket::~Socket() {
+    if (fd_ != -1) {
+        close(fd_);
+        fd_ = -1;
     }
 }
 
-ThreadPool::~ThreadPool() {
+int Socket::fd() {
+    return fd_;
+}
+
+bool Socket::isvalid() {
+    return fd_ != -1;
+}
+
+bool Socket::enableport() {
+    int opt = 1;
+    if (setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+        std::cout << strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
+IPV4::IPV4(uint16_t port) {
+    addr_.sin_family = AF_INET;
+    addr_.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr_.sin_port = htons(port);
+}
+
+sockaddr* IPV4::change() {
+    return reinterpret_cast<sockaddr*>(&addr_);
+}
+
+socklen_t IPV4::len() {
+    return sizeof(addr_);
+}
+
+uint16_t IPV4::getport() {
+    return ntohs(addr_.sin_port);
+}
+
+Threadpool::Threadpool(size_t num) {
+    if (num == 0) {
+        num = 4;
+    }
+    for (size_t i = 0; i < num; ++i) {
+        threads_.emplace_back(&Threadpool::work, this);
+    }
+}
+
+Threadpool::~Threadpool() {
     {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         stop_ = true;
     }
-    condition_.notify_all();
-    for (std::thread& worker : workers_) {
-        worker.join();
+    cond_.notify_all();
+    for (auto& t : threads_) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
 }
 
-template <typename F>
-void ThreadPool::submit(F&& f) {
+void Threadpool::addtask(std::function<void()> task) {
     {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        if (stop_) {
-            return;
-        }
-        tasks_.emplace(std::forward<F>(f));
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push(std::move(task));
     }
-    condition_.notify_one();
+    cond_.notify_one();
 }
+
+void Threadpool::work() {
+    while (true) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cond_.wait(lock, [this]() { return stop_ || !tasks_.empty(); });
+            if (stop_ && tasks_.empty()) {
+                return;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop();
+        }
+        task();
+    }
+}
+
 ftpepollserver::ftpepollserver(uint16_t port)
-    : port_(port),
-      listensock_(AF_INET, SOCK_STREAM, 0),
-      thread_pool_(THREAD_NUM),
-      running_(true) {
+    : port_(port), listensock_(AF_INET, SOCK_STREAM, 0) {
     account["ftp"] = "123456";
+    set_nonblock(listensock_.fd());
+    epfd = epoll_create1(0);
 }
 
 ftpepollserver::~ftpepollserver() {
-    running_ = false;
-    close(epfd_);
+    close(epfd);
 }
 
 void ftpepollserver::run() {
@@ -114,304 +216,232 @@ void ftpepollserver::run() {
     }
 
     IPV4 addr(port_);
-    if (bind(listensock_.fd(), addr.change(), addr.len()) == -1) {
-        std::perror("bind");
-        return;
-    }
-
-    if (listen(listensock_.fd(), 16) == -1) {
-        std::perror("listen");
-        return;
-    }
-
-    std::cout << "ftp server listen on port " << port_ << '\n';
-
-    // 添加监听socket到epoll
-    add_to_epoll(listensock_.fd(), EPOLLIN | EPOLLET);
+    bind(listensock_.fd(), addr.change(), addr.len());
+    listen(listensock_.fd(), 16);
+    std::cout << "ftp server listen on " << port_ << '\n';
+    add_epoll(listensock_.fd(), EPOLLET | EPOLLIN);
 
     struct epoll_event events[MAX_SIZE];
-
-    while (running_) {
-        int n = epoll_wait(epfd_, events, MAX_SIZE, -1);
-
+    while (1) {
+        int n = epoll_wait(epfd, events, MAX_SIZE, -1);
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
-            uint32_t ev = events[i].events;
-
             if (fd == listensock_.fd()) {
-                // 接受新连接
-                while (true) {
+                while (1) {
                     int cfd = accept(listensock_.fd(), nullptr, nullptr);
                     if (cfd == -1) {
-                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                            std::perror("accept");
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;
                         }
                         break;
                     }
-
-                    std::cout << "有一个客户端成功连接, fd=" << cfd << "\n";
+                    std::cout << "有一个客户端成功连接\n";
                     set_nonblock(cfd);
-
                     {
                         std::lock_guard<std::mutex> lock(clients_mutex_);
-                        clients_[cfd] = Client();
+                        clients[cfd] = Client();
+                        clients[cfd].writebuf += "220 ftp server ready\r\n";
                     }
-
-                    add_to_epoll(cfd, EPOLLIN | EPOLLET);
-                    sendmessage(cfd, 220, "ftp server ready");
+                    add_epoll(cfd, EPOLLIN | EPOLLET | EPOLLOUT | EPOLLRDHUP);
                 }
-            } else {
-                if (ev & EPOLLIN) {
-                    // 提交读任务到线程池
-                    thread_pool_.submit([this, fd]() { handle_read(fd); });
-                }
-                if (ev & EPOLLOUT) {
-                    // 提交写任务到线程池
-                    thread_pool_.submit([this, fd]() { handle_write(fd); });
-                }
-                if (ev & (EPOLLERR | EPOLLHUP)) {
-                    // 连接错误，关闭
-                    std::cout << "连接关闭, fd=" << fd << "\n";
-                    {
-                        std::lock_guard<std::mutex> lock(clients_mutex_);
-                        auto it = clients_.find(fd);
-                        if (it != clients_.end()) {
-                            closePASV(it->second);
-                            clients_.erase(it);
-                        }
-                    }
-                    remove_from_epoll(fd);
-                    close(fd);
-                }
+            } else if (events[i].events & EPOLLIN) {
+                // ✅ 主线程直接处理读，不丢线程池
+                handle_read(fd);
+            } else if (events[i].events & EPOLLOUT) {
+                // ✅ 主线程直接处理写，不丢线程池
+                handle_write(fd);
             }
         }
     }
-
-    close(epfd_);
 }
 
-void ftpepollserver::handle_read(int cfd) {
-    Client client_copy;
-    {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        auto it = clients_.find(cfd);
-        if (it == clients_.end()) {
-            return;
-        }
-        client_copy = it->second;
-    }
-
+void ftpepollserver::handle_read(int fd) {
     char buf[4096];
-    bool has_data = false;
+
+    // 获取client的引用（主线程独占，安全）
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    auto it = clients.find(fd);
+    if (it == clients.end()) {
+        return;
+    }
+    Client& client = it->second;
 
     // 非阻塞读取所有数据
-    while (true) {
-        ssize_t n = recv(cfd, buf, sizeof(buf), 0);
-        if (n > 0) {
-            has_data = true;
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex_);
-                clients_[cfd].recv_buffer.append(buf, n);
-            }
-        } else if (n == 0) {
-            // 连接关闭
-            std::cout << "客户端关闭连接, fd=" << cfd << "\n";
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex_);
-                auto it = clients_.find(cfd);
-                if (it != clients_.end()) {
-                    closePASV(it->second);
-                    clients_.erase(it);
-                }
-            }
-            remove_from_epoll(cfd);
-            close(cfd);
-            return;
-        } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;  // 数据读完了
-            } else {
-                // 读错误
-                std::perror("recv");
+    while (1) {
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            if (n == 0 || (n == -1 && errno != EAGAIN)) {
+                // 连接关闭或错误
+                close(fd);
+                clients.erase(fd);
+                del_epoll(fd, 0);
                 return;
             }
+            break;  // EAGAIN，数据读完了
         }
-    }
-
-    // 如果有数据，处理命令
-    if (has_data) {
-        process_command(cfd);
-    }
-}
-
-void ftpepollserver::handle_write(int cfd) {
-    std::lock_guard<std::mutex> lock(clients_mutex_);
-    auto it = clients_.find(cfd);
-    if (it == clients_.end()) {
-        return;
-    }
-
-    Client& client = it->second;
-    if (client.send_buffer.empty()) {
-        // 没有数据要发送，移除EPOLLOUT事件
-        mod_epoll(cfd, EPOLLIN | EPOLLET);
-        client.send_pending = false;
-        return;
-    }
-
-    // 发送数据
-    ssize_t n =
-        send(cfd, client.send_buffer.c_str(), client.send_buffer.size(), 0);
-    if (n > 0) {
-        client.send_buffer.erase(0, n);
-        if (client.send_buffer.empty()) {
-            // 发送完成，移除EPOLLOUT事件
-            mod_epoll(cfd, EPOLLIN | EPOLLET);
-            client.send_pending = false;
-        }
-    } else if (n == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        // 发送错误，关闭连接
-        closePASV(client);
-        clients_.erase(it);
-        remove_from_epoll(cfd);
-        close(cfd);
-    }
-}
-
-void ftpepollserver::process_command(int cfd) {
-    Client client_copy;
-    std::string recv_buffer;
-
-    {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        auto it = clients_.find(cfd);
-        if (it == clients_.end()) {
-            return;
-        }
-        recv_buffer = it->second.recv_buffer;
-        client_copy = it->second;
+        client.readbuf.append(buf, n);
     }
 
     // 解析完整命令
-    size_t pos;
-    while ((pos = recv_buffer.find('\n')) != std::string::npos) {
-        std::string line = recv_buffer.substr(0, pos + 1);
-        recv_buffer.erase(0, pos + 1);
-
+    while (1) {
+        size_t pos = client.readbuf.find("\n");
+        if (pos == std::string::npos) {
+            break;
+        }
+        std::string line = client.readbuf.substr(0, pos + 1);
+        client.readbuf.erase(0, pos + 1);
         line = getlineok(line);
-        if (line.empty())
-            continue;
 
-        std::string cmd;
-        std::string arg;
-        size_t space_pos = line.find(' ');
-        if (space_pos == std::string::npos) {
+        std::string cmd, arg;
+        size_t p = line.find(' ');
+        if (p == std::string::npos) {
             cmd = line;
         } else {
-            cmd = line.substr(0, space_pos);
-            arg = line.substr(space_pos + 1);
+            cmd = line.substr(0, p);
+            arg = line.substr(p + 1);
         }
 
-        // 处理命令
         if (cmd == "USER") {
-            USER(cfd, client_copy, arg);
+            USER(fd, client, arg);
         } else if (cmd == "PASS") {
-            PASS(cfd, client_copy, arg);
+            PASS(fd, client, arg);
         } else if (cmd == "QUIT") {
-            sendmessage(cfd, 221, "bye bye");
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex_);
-                auto it = clients_.find(cfd);
-                if (it != clients_.end()) {
-                    closePASV(it->second);
-                    clients_.erase(it);
-                }
-            }
-            remove_from_epoll(cfd);
-            close(cfd);
+            client.writebuf += "221 bye bye\r\n";
+            // QUIT后关闭连接
+            close(fd);
+            clients.erase(fd);
+            del_epoll(fd, 0);
             return;
-        } else if (!client_copy.islogin) {
-            sendmessage(cfd, 530, "login first");
+        } else if (!client.islogin) {
+            client.writebuf += "530 login first\r\n";
         } else if (strcasecmp(cmd.c_str(), "PASV") == 0) {
-            PASV(cfd, client_copy);
+            PASV(fd, client);
         } else if (strcasecmp(cmd.c_str(), "LIST") == 0) {
-            LIST(cfd, client_copy);
+            // ✅ LIST丢线程池
+            int cfd = fd;
+            pool.addtask([this, cfd]() {
+                std::lock_guard<std::mutex> lock(clients_mutex_);
+                auto it = clients.find(cfd);
+                if (it == clients.end())
+                    return;
+                LIST(cfd, it->second);
+            });
         } else if (strcasecmp(cmd.c_str(), "RETR") == 0) {
-            RETR(cfd, client_copy, arg);
+            // ✅ RETR丢线程池，需要拷贝arg
+            int cfd = fd;
+            std::string path = arg;
+            pool.addtask([this, cfd, path]() {
+                std::lock_guard<std::mutex> lock(clients_mutex_);
+                auto it = clients.find(cfd);
+                if (it == clients.end())
+                    return;
+                RETR(cfd, it->second, const_cast<std::string&>(path));
+            });
         } else if (strcasecmp(cmd.c_str(), "STOR") == 0) {
-            STOR(cfd, client_copy, arg);
+            // ✅ STOR丢线程池，需要拷贝arg
+            int cfd = fd;
+            std::string path = arg;
+            pool.addtask([this, cfd, path]() {
+                std::lock_guard<std::mutex> lock(clients_mutex_);
+                auto it = clients.find(cfd);
+                if (it == clients.end())
+                    return;
+                STOR(cfd, it->second, const_cast<std::string&>(path));
+            });
         } else {
-            sendmessage(cfd, 502, "command errno");
+            client.writebuf += "502 command error\r\n";
         }
+    }
 
-        // 更新client状态
-        {
-            std::lock_guard<std::mutex> lock(clients_mutex_);
-            if (clients_.find(cfd) != clients_.end()) {
-                clients_[cfd] = client_copy;
-                clients_[cfd].recv_buffer = recv_buffer;
-            }
-        }
+    // 如果有数据要发送，确保EPOLLOUT事件已注册
+    if (!client.writebuf.empty()) {
+        mod_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP);
     }
 }
 
-void ftpepollserver::add_to_epoll(int fd, uint32_t events) {
-    struct epoll_event ev;
+void ftpepollserver::handle_write(int fd) {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    auto it = clients.find(fd);
+    if (it == clients.end()) {
+        return;
+    }
+    Client& client = it->second;
+
+    while (!client.writebuf.empty()) {
+        ssize_t n = send(fd, client.writebuf.data(), client.writebuf.size(), 0);
+        if (n <= 0) {
+            if (n == -1 && errno == EAGAIN) {
+                break;  // 缓冲区满，下次再发
+            }
+            // 发送错误，关闭连接
+            close(fd);
+            clients.erase(fd);
+            del_epoll(fd, 0);
+            return;
+        } else {
+            client.writebuf.erase(0, n);
+        }
+    }
+
+    // 发送完成后，移除EPOLLOUT事件
+    if (client.writebuf.empty()) {
+        mod_epoll(fd, EPOLLIN | EPOLLET | EPOLLRDHUP);
+    }
+}
+
+void ftpepollserver::add_epoll(int fd, uint32_t events) {
+    epoll_event ev{};
     ev.events = events;
     ev.data.fd = fd;
-    if (epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
-        std::perror("epoll_ctl add");
-    }
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+void ftpepollserver::del_epoll(int fd, uint32_t events) {
+    epoll_event ev{};
+    ev.events = events;
+    ev.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &ev);
 }
 
 void ftpepollserver::mod_epoll(int fd, uint32_t events) {
-    struct epoll_event ev;
-    ev.events = events;
-    ev.data.fd = fd;
-    if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == -1) {
-        std::perror("epoll_ctl mod");
-    }
+    epoll_event event{};
+    event.events = events;
+    event.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event);
 }
 
-void ftpepollserver::remove_from_epoll(int fd) {
-    epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
-}
-
-void ftpepollserver::handleclient(int cfd) {
-    // 这个函数保留但不再使用，保持接口兼容
-    // 实际处理在 process_command 中
-}
-
-// 以下函数保持不变，但修改发送方式以支持异步发送
+// 修改USER，使用writebuf而不是sendmessage
 void ftpepollserver::USER(int cfd, Client& client, std::string& user) {
     if (user.empty()) {
-        sendmessage(cfd, 501, "username");
+        client.writebuf += "501 username\r\n";
         return;
     }
     if (account.count(user) == 0) {
-        sendmessage(cfd, 530, "username exist");
+        client.writebuf += "530 username not exist\r\n";
         return;
     }
     client.username = user;
     client.hasuser = true;
     client.islogin = false;
-    sendmessage(cfd, 331, "need password");
+    client.writebuf += "331 need password\r\n";
 }
 
+// 修改PASS，使用writebuf而不是sendmessage
 void ftpepollserver::PASS(int cfd, Client& client, std::string& pass) {
     if (!client.hasuser) {
-        sendmessage(cfd, 503, "need username");
+        client.writebuf += "503 need username\r\n";
         return;
     }
     auto it = account.find(client.username);
     if (it == account.end() || it->second != pass) {
-        sendmessage(cfd, 530, "password errno");
+        client.writebuf += "530 password error\r\n";
         return;
     }
     client.islogin = true;
-    sendmessage(cfd, 230, "login succeful");
+    client.writebuf += "230 login successful\r\n";
 }
 
+// 修改PASV，使用writebuf而不是sendmessage
 void ftpepollserver::PASV(int cfd, Client& client) {
     closePASV(client);
 
@@ -435,11 +465,11 @@ void ftpepollserver::PASV(int cfd, Client& client) {
     int p2 = port % 256;
 
     client.pasvfd = fd;
-    sendmessage(cfd, 227,
-                "Entering Passive Mode (" + std::to_string(ip[0]) + "," +
-                    std::to_string(ip[1]) + "," + std::to_string(ip[2]) + "," +
-                    std::to_string(ip[3]) + "," + std::to_string(p1) + "," +
-                    std::to_string(p2) + ")");
+    client.writebuf += "227 Entering Passive Mode (" + std::to_string(ip[0]) +
+                       "," + std::to_string(ip[1]) + "," +
+                       std::to_string(ip[2]) + "," + std::to_string(ip[3]) +
+                       "," + std::to_string(p1) + "," + std::to_string(p2) +
+                       ")\r\n";
 }
 
 int ftpepollserver::acceptdata(Client& client) {
@@ -448,64 +478,67 @@ int ftpepollserver::acceptdata(Client& client) {
     }
     int datafd = accept(client.pasvfd, nullptr, nullptr);
     closePASV(client);
-    if (datafd != -1) {
-        set_nonblock(datafd);
-    }
     return datafd;
 }
 
+// 修改LIST，使用writebuf而不是sendmessage
 void ftpepollserver::LIST(int cfd, Client& client) {
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "need pasv first");
+        client.writebuf += "425 need pasv first\r\n";
         return;
     }
-    sendmessage(cfd, 150, "open data connection for list");
+
+    // 发送150响应到控制连接
+    client.writebuf += "150 open data connection for list\r\n";
+
     int datafd = acceptdata(client);
     if (datafd == -1) {
-        sendmessage(cfd, 425, "data connect failed");
+        client.writebuf += "425 data connect failed\r\n";
         return;
     }
 
     DIR* dir = opendir(".");
     if (dir == nullptr) {
         close(datafd);
-        sendmessage(cfd, 550, "open dir failed");
+        client.writebuf += "550 open dir failed\r\n";
         return;
     }
 
     dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
         std::string line = std::string(ent->d_name) + "\r\n";
-        if (!sendstr(datafd, line)) {
+        if (!sendn(datafd, line.data(), line.size())) {
             break;
         }
     }
     closedir(dir);
     close(datafd);
-    sendmessage(cfd, 226, "list complete");
+    client.writebuf += "226 list complete\r\n";
 }
 
+// 修改RETR，使用writebuf而不是sendmessage
 void ftpepollserver::RETR(int cfd, Client& client, std::string& path) {
     if (path.empty()) {
-        sendmessage(cfd, 501, "need file name");
+        client.writebuf += "501 need file name\r\n";
         return;
     }
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "need pasv first");
+        client.writebuf += "425 need pasv first\r\n";
         return;
     }
 
     int fd = open(path.c_str(), O_RDONLY);
     if (fd == -1) {
-        sendmessage(cfd, 550, "file not found");
+        client.writebuf += "550 file not found\r\n";
         return;
     }
 
-    sendmessage(cfd, 150, "open data connect for retr");
+    client.writebuf += "150 open data connect for retr\r\n";
+
     int datafd = acceptdata(client);
     if (datafd == -1) {
         close(fd);
-        sendmessage(cfd, 425, "data connect failed");
+        client.writebuf += "425 data connect failed\r\n";
         return;
     }
 
@@ -521,31 +554,36 @@ void ftpepollserver::RETR(int cfd, Client& client, std::string& path) {
 
     close(fd);
     close(datafd);
-    int num = ok ? 226 : 426;
-    sendmessage(cfd, num, ok ? "retr complete" : "connect close");
+    if (ok) {
+        client.writebuf += "226 retr complete\r\n";
+    } else {
+        client.writebuf += "426 connect close\r\n";
+    }
 }
 
+// 修改STOR，使用writebuf而不是sendmessage
 void ftpepollserver::STOR(int cfd, Client& client, std::string& path) {
     if (path.empty()) {
-        sendmessage(cfd, 501, "need file name");
+        client.writebuf += "501 need file name\r\n";
         return;
     }
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "need pasv first");
+        client.writebuf += "425 need pasv first\r\n";
         return;
     }
 
     int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
-        sendmessage(cfd, 550, "create file failed");
+        client.writebuf += "550 create file failed\r\n";
         return;
     }
 
-    sendmessage(cfd, 150, "open data connect for stor");
+    client.writebuf += "150 open data connect for stor\r\n";
+
     int datafd = acceptdata(client);
     if (datafd == -1) {
         close(fd);
-        sendmessage(cfd, 425, "data connect failed");
+        client.writebuf += "425 data connect failed\r\n";
         return;
     }
 
@@ -561,8 +599,11 @@ void ftpepollserver::STOR(int cfd, Client& client, std::string& path) {
 
     close(fd);
     close(datafd);
-    int num = ok ? 226 : 426;
-    sendmessage(cfd, num, ok ? "stor complete" : "connect close");
+    if (ok) {
+        client.writebuf += "226 stor complete\r\n";
+    } else {
+        client.writebuf += "426 connect close\r\n";
+    }
 }
 
 void ftpepollserver::closePASV(Client& client) {
@@ -572,7 +613,6 @@ void ftpepollserver::closePASV(Client& client) {
     }
 }
 
-// 辅助函数实现
 std::string getlineok(std::string line) {
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
         line.pop_back();
@@ -584,9 +624,6 @@ bool sendn(int fd, char* data, size_t len) {
     while (len > 0) {
         ssize_t n = send(fd, data, len, 0);
         if (n <= 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                continue;
-            }
             return false;
         }
         data += n;
@@ -599,18 +636,14 @@ bool sendstr(int fd, std::string& text) {
     return sendn(fd, text.data(), text.size());
 }
 
-void sendmessage(int fd, int code, std::string text) {
-    std::string line = std::to_string(code) + " " + text + "\r\n";
-
-    // 获取client并添加到发送缓冲区
-    // 这里需要访问全局的clients_，需要外部传入
-    // 简化实现：直接发送（注意：生产环境需要改为异步发送）
-    sendstr(fd, line);
-}
-
 void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void set_block(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 }
 
 int main() {

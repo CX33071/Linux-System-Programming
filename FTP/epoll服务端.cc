@@ -6,12 +6,16 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 #include <sys/epoll.h>
 #define MAX_SIZE 100
 
@@ -43,9 +47,23 @@ struct Client {
     bool islogin = false;
     std::string username;
     int pasvfd = -1;
+    std::string readbuf;
+    std::string writebuf;
 };
 class Threadpool {
+public:
+    Threadpool(size_t num = std::thread::hardware_concurrency());
+    ~Threadpool();
+    void addtask(std::function<void()> task);
 
+private:
+    void work();
+
+    bool stop_ = false;
+    std::mutex mutex_;
+    std::condition_variable cond_;
+    std::queue<std::function<void()>> tasks_;
+    std::vector<std::thread> threads_;
 };
 class ftpepollserver {
    public:
@@ -54,31 +72,34 @@ class ftpepollserver {
     void run();
 
    private:
+    void handle_read(int fd,int pos);
+    void handle_write(int fd);
     void add_epoll(int fd, uint32_t events);
     void del_epoll(int fd, uint32_t events);
-    void handleclient(int cfd);
+    void mod_epoll(int fd, uint32_t events);
     void USER(int cfd, Client& client, std::string& user);
     void PASS(int cfd, Client& client, std::string& pass);
     void PASV(int cfd, Client& client);
     int acceptdata(Client& client);
     void LIST(int cfd, Client& client);
-    void RETR(int cfd, Client& client, std::string& path);
-    void STOR(int cfd, Client& client, std::string& path);
+    void RETR(int cfd, Client& client, std::string path);
+    void STOR(int cfd, Client& client, std::string path);
     void closePASV(Client& client);
 
     uint16_t port_;
     Socket listensock_;
     int epfd;
     Threadpool pool;
+    std::map<int, Client> clients;
     std::map<std::string, std::string> account;
 };
 
 std::string getlineok(std::string line);
-std::string readline(int fd);
 bool sendn(int fd, char* data, size_t len);
 bool sendstr(int fd, std::string& text);
 void sendmessage(int fd, int code, std::string text);
 void set_nonblock(int fd);
+void set_block(int fd);
 Socket::Socket(int domain, int type, int protocol)
     : fd_(socket(domain, type, protocol)) {}
 
@@ -124,6 +145,30 @@ uint16_t IPV4::getport() {
     return ntohs(addr_.sin_port);
 }
 
+Threadpool::Threadpool(size_t n){
+    if(n==0){
+        n = 4;
+    }
+    for (int i = 0; i < n;i++){
+        std::thread t(&Threadpool::work, this);
+        threads_.push_back(std::move(t));
+    }
+}
+Threadpool::~Threadpool(){
+    std::unique_lock<std::mutex> lock(mutex_);
+    cond_.notify_all();
+    for (auto& t : threads_) {
+        if(t.joinable()){
+            t.join();
+        }
+    }
+}
+void Threadpool::work(){
+
+}
+void Threadpool::addtask(std::function<void()> task) {
+
+}
 ftpepollserver::ftpepollserver(uint16_t port)
     : port_(port), listensock_(AF_INET, SOCK_STREAM, 0) {
     account["ftp"] = "123456";
@@ -151,94 +196,118 @@ void ftpepollserver::run() {
     struct epoll_event events[MAX_SIZE];
     while (1) {
         int n = epoll_wait(epfd, events, MAX_SIZE, -1);
-        for (int i = 0; i < n;i++){
+        for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
-            if(fd==listensock_.fd()){
-                while(1){
-                int cfd = accept(listensock_.fd(), nullptr, nullptr);
-                std::cout << "有一个客户端成功连接\n";
-                set_nonblock(cfd);
-                add_epoll(cfd, EPOLLIN | EPOLLET);
-               
+            if (fd == listensock_.fd()) {
+                while (1) {
+                    int cfd = accept(listensock_.fd(), nullptr, nullptr);
+                    std::cout << "有一个客户端成功连接\n";
+                    set_nonblock(cfd);
+                    clients[cfd] = Client();
+                    clients[cfd].writebuf += "220 ftp server ready\r\n";
+                    add_epoll(cfd, EPOLLIN | EPOLLET |EPOLLOUT);
+                }
+            } else if(events[i].events&EPOLLIN){
+                size_t pos = 0;
+                handle_read(fd,pos);
+            } else if (events[i].events & EPOLLOUT) {
+                handle_write(fd);
             }
-         } else {
-            if(events[i].events&EPOLLIN){
-                
             }
-            }
-        }
     }
-    close(epfd);
 }
-
-void ftpepollserver::handleclient(int cfd) {
-    Client client;
-    sendmessage(cfd, 220, "ftp server ready");
-
-    while (1) {
-        std::string s = readline(cfd);
-        std::string cmd;
-        std::string arg;
-        size_t pos = s.find(' ');
-        if (pos == std::string::npos) {
-            cmd = s;
-        } else {
-            cmd = s.substr(0, pos);
-            arg = s.substr(pos + 1);
+void ftpepollserver::handle_read(int fd,int pos){
+    size_t n;
+    char buf[4096];
+    while(1){
+    n = read(fd, buf, sizeof(buf));
+        if(n<=0){
+            close(fd);
+            return;
+        }else{
+    clients[fd].readbuf.append(buf,pos,n);
+    pos += n;
         }
-        if (cmd == "USER") {
-            USER(cfd, client, arg);
+        std::string cmd, arg;
+        int p = clients[fd].readbuf.find(' ');
+        if(p==std::string::npos){
+            cmd = clients[fd].readbuf;
+        }else{
+            cmd = clients[fd].readbuf.substr(0, p);
+            arg = clients[fd].readbuf.substr(p + 1);
+        }
+        if(cmd=="USER"){
+            USER(fd, clients[fd], arg);
         } else if (cmd == "PASS") {
-            PASS(cfd, client, arg);
+            PASS(fd, clients[fd], arg);
         } else if (cmd == "QUIT") {
-            sendmessage(cfd, 221, "bye bye");
-            break;
-        } else if (!client.islogin) {
-            sendmessage(cfd, 530, "login first");
-        } else if (!strcasecmp(cmd.c_str(), "PASV")) {
-            PASV(cfd, client);
-        } else if (!strcasecmp(cmd.c_str(), "LIST")) {
-            LIST(cfd, client);
-        } else if (!strcasecmp(cmd.c_str(), "RETR")) {
-            RETR(cfd, client, arg);
-        } else if (!strcasecmp(cmd.c_str(), "STOR")) {
-            STOR(cfd, client, arg);
-        } else {
-            sendmessage(cfd, 502, "command errno");
+            clients[fd].writebuf += "221,bye bye\r\n";
+        } else if (!strcasecmp(cmd.c_str(), "pasv")) {
+        } else if (!strcasecmp(cmd.c_str(), "list")) {
+            pool.addtask([this, fd]() { LIST(fd, clients[fd]); });
+        } else if (!strcasecmp(cmd.c_str(), "stor")) {
+            pool.addtask([this, fd,arg]() { STOR(fd, clients[fd],arg); });
+        } else if (!strcasecmp(cmd.c_str(), "retr")) {
+            pool.addtask([this, fd,arg]() { RETR(fd, clients[fd], arg); });
+        }else{
+            clients[fd].writebuf += "502 command errno\r\n";
         }
     }
-
-    closePASV(client);
-    close(cfd);
+}
+void ftpepollserver::handle_write(int fd){
+    size_t n;
+    while(!clients[fd].writebuf.empty()){
+        n = send(fd, clients[fd].writebuf.data(), clients[fd].writebuf.size(),0);
+        clients[fd].writebuf.erase(0,n);
+    }
+    mod_epoll(fd, EPOLLIN | EPOLLET);
+}
+void ftpepollserver::add_epoll(int fd, uint32_t events) {
+    epoll_event ev{};
+    ev.events = events;
+    ev.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 }
 
+void ftpepollserver::del_epoll(int fd, uint32_t events) {
+    epoll_event ev{};
+    ev.events = events;
+    ev.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &ev);
+}
+void ftpepollserver::mod_epoll(int fd,uint32_t events){
+    epoll_event event{};
+    event.events = events;
+    event.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event);
+}
 void ftpepollserver::USER(int cfd, Client& client, std::string& user) {
     if (user.empty()) {
-        sendmessage(cfd, 501, "username");
+        clients[cfd].writebuf += "501 need username\r\n";
         return;
     }
     if (account.count(user) == 0) {
-        sendmessage(cfd, 530, "username exist");
+        clients[cfd].writebuf += "530 username exist\r\n";
         return;
     }
     client.username = user;
     client.hasuser = true;
     client.islogin = false;
-    sendmessage(cfd, 331, "need password");
+    clients[cfd].writebuf += "331 need password\r\n";
 }
 
 void ftpepollserver::PASS(int cfd, Client& client, std::string& pass) {
     if (!client.hasuser) {
-        sendmessage(cfd, 503, "need username");
+        clients[cfd].writebuf += "503 need username\r\n";
         return;
     }
     auto it = account.find(client.username);
     if (it == account.end() || it->second != pass) {
-        sendmessage(cfd, 530, "password errno");
+        clients[cfd].writebuf += "530 password errno\r\n";
         return;
     }
     client.islogin = true;
-    sendmessage(cfd, 230, "login succeful");
+    clients[cfd].writebuf += "230 login succeful\r\n";
 }
 
 void ftpepollserver::PASV(int cfd, Client& client) {
@@ -264,11 +333,11 @@ void ftpepollserver::PASV(int cfd, Client& client) {
     int p2 = port % 256;
 
     client.pasvfd = fd;
-    sendmessage(cfd, 227,
-                "Entering Passive Mode (" + std::to_string(ip[0]) + "," +
-                    std::to_string(ip[1]) + "," + std::to_string(ip[2]) + "," +
-                    std::to_string(ip[3]) + "," + std::to_string(p1) + "," +
-                    std::to_string(p2) + ")");
+    std::string s = "";
+    s = "227 Entering Passive Mode (" + std::to_string(ip[0]) + "," +
+         std::to_string(ip[1]) + "," + std::to_string(ip[2]) + "," +
+         std::to_string(ip[3]) + "," + std::to_string(p1) + "," +
+         std::to_string(p2) + ")";
 }
 
 int ftpepollserver::acceptdata(Client& client) {
@@ -311,7 +380,7 @@ void ftpepollserver::LIST(int cfd, Client& client) {
     sendmessage(cfd, 226, "list complete");
 }
 
-void ftpepollserver::RETR(int cfd, Client& client, std::string& path) {
+void ftpepollserver::RETR(int cfd, Client& client, std::string path) {
     if (path.empty()) {
         sendmessage(cfd, 501, "need file name");
         return;
@@ -351,7 +420,7 @@ void ftpepollserver::RETR(int cfd, Client& client, std::string& path) {
     sendmessage(cfd, num, ok ? "retr complete" : "connect close");
 }
 
-void ftpepollserver::STOR(int cfd, Client& client, std::string& path) {
+void ftpepollserver::STOR(int cfd, Client& client, std::string path) {
     if (path.empty()) {
         sendmessage(cfd, 501, "need file name");
         return;
@@ -397,27 +466,12 @@ void ftpepollserver::closePASV(Client& client) {
         client.pasvfd = -1;
     }
 }
-
 std::string getlineok(std::string line) {
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
         line.pop_back();
     }
     return line;
 }
-
-std::string readline(int fd) {
-    std::string line;
-    char ch = 0;
-    while (true) {
-        ssize_t n = recv(fd, &ch, 1, 0);
-        line.push_back(ch);
-        if (ch == '\n') {
-            break;
-        }
-    }
-    return getlineok(line);
-}
-
 bool sendn(int fd, char* data, size_t len) {
     while (len > 0) {
         ssize_t n = send(fd, data, len, 0);
@@ -442,6 +496,11 @@ void sendmessage(int fd, int code, std::string text) {
 void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void set_block(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags |O_NONBLOCK);
 }
 int main() {
     ftpepollserver server(2100);
