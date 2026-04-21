@@ -229,6 +229,7 @@ void ftpepollserver::run() {
                     }
                     std::cout << "有一个客户端成功连接\n";
                     set_nonblock(cfd);
+                    std::lock_guard<std::mutex> lock(clients[cfd].mutex);
                     clients[cfd].writebuf += "220 ftp server ready\r\n";
                     add_epoll(cfd, EPOLLIN | EPOLLET | EPOLLOUT);
                 }
@@ -282,6 +283,7 @@ void ftpepollserver::handle_read(int fd){
         } else if (cmd == "PASS") {
             PASS(fd, clients[fd], arg);
         } else if (cmd == "QUIT") {
+            std::lock_guard<std::mutex> lock(clients[fd].mutex);
             clients[fd].writebuf += "221,bye bye\r\n";
             mod_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET);
         } else if (!strcasecmp(cmd.c_str(), "pasv")) {
@@ -293,6 +295,7 @@ void ftpepollserver::handle_read(int fd){
         } else if (!strcasecmp(cmd.c_str(), "retr")) {
             pool.addtask([this, fd,arg]() { RETR(fd, clients[fd], arg); });
         } else {
+            std::lock_guard<std::mutex> lock(clients[fd].mutex);
             clients[fd].writebuf += "502 command errno\r\n";
             mod_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET);
         }
@@ -342,11 +345,13 @@ void ftpepollserver::mod_epoll(int fd,uint32_t events){
 }
 void ftpepollserver::USER(int cfd, Client& client, std::string& user) {
     if (user.empty()) {
+        std::lock_guard<std::mutex> lock(clients[cfd].mutex);
         clients[cfd].writebuf += "501 need username\r\n";
         mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     if (account.count(user) == 0) {
+        std::lock_guard<std::mutex> lock(clients[cfd].mutex);
         clients[cfd].writebuf += "530 username exist\r\n";
         mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
@@ -354,23 +359,27 @@ void ftpepollserver::USER(int cfd, Client& client, std::string& user) {
     client.username = user;
     client.hasuser = true;
     client.islogin = false;
+    std::lock_guard<std::mutex> lock(clients[cfd].mutex);
     clients[cfd].writebuf += "331 need password\r\n";
     mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 void ftpepollserver::PASS(int cfd, Client& client, std::string& pass) {
     if (!client.hasuser) {
+        std::lock_guard<std::mutex> lock(clients[cfd].mutex);
         clients[cfd].writebuf += "503 need username\r\n";
         mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     auto it = account.find(client.username);
     if (it == account.end() || it->second != pass) {
+        std::lock_guard<std::mutex> lock(clients[cfd].mutex);
         clients[cfd].writebuf += "530 password errno\r\n";
         mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     client.islogin = true;
+    std::lock_guard<std::mutex> lock(clients[cfd].mutex);
     clients[cfd].writebuf += "230 login succeful\r\n";
     mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
@@ -398,6 +407,7 @@ void ftpepollserver::PASV(int cfd, Client& client) {
     int p2 = port % 256;
 
     client.pasvfd = fd;
+    std::lock_guard<std::mutex> lock(clients[cfd].mutex);
     clients[cfd].writebuf+="227 Entering Passive Mode (" + std::to_string(ip[0]) + "," +
          std::to_string(ip[1]) + "," + std::to_string(ip[2]) + "," +
          std::to_string(ip[3]) + "," + std::to_string(p1) + "," +
@@ -442,16 +452,16 @@ void ftpepollserver::LIST(int cfd, Client& client) {
     dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
         std::string line = std::string(ent->d_name) + "\r\n";
-        if(!sendn(datafd,line.data(),line.size())){
-            break;
-        }
+        clients[cfd].writebuf += line;
     }
     closedir(dir);
-    close(datafd);
     clients[cfd].writebuf += "226 list complete\r\n";
     mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
+    close(datafd);
 }
-
+// if (!sendn(datafd, line.data(), line.size())) {
+//     break;
+// }
 void ftpepollserver::RETR(int cfd, Client& client, std::string path) {
     if (path.empty()) {
         clients[cfd].writebuf += "501 need file name\r\n";
