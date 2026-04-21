@@ -431,7 +431,6 @@ void ftpepollserver::LIST(int cfd, Client& client) {
         mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
-    std::lock_guard<std::mutex> lock(client.mutex);
     clients[cfd].writebuf += "150 open data connection for list\r\n";
     mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
     int datafd = acceptdata(client);
@@ -442,6 +441,7 @@ void ftpepollserver::LIST(int cfd, Client& client) {
     }
 
     DIR* dir = opendir(".");
+    std::string datafdwritebuf;
     if (dir == nullptr) {
         close(datafd);
         clients[cfd].writebuf += "550 open dir failed\r\n";
@@ -451,17 +451,17 @@ void ftpepollserver::LIST(int cfd, Client& client) {
 
     dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
+        std::lock_guard<std::mutex> lock(client.mutex);
         std::string line = std::string(ent->d_name) + "\r\n";
-        clients[cfd].writebuf += line;
+        if (!sendn(datafd, line.data(), line.size())) {
+            break;
+        }
     }
     closedir(dir);
+    close(datafd);
     clients[cfd].writebuf += "226 list complete\r\n";
     mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
-    close(datafd);
-}
-// if (!sendn(datafd, line.data(), line.size())) {
-//     break;
-// }
+} 
 void ftpepollserver::RETR(int cfd, Client& client, std::string path) {
     if (path.empty()) {
         clients[cfd].writebuf += "501 need file name\r\n";
