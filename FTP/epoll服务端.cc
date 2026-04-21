@@ -73,7 +73,7 @@ class ftpepollserver {
     void run();
 
    private:
-    void handle_read(int fd,int pos);
+    void handle_read(int fd);
     void handle_write(int fd);
     void add_epoll(int fd, uint32_t events);
     void del_epoll(int fd, uint32_t events);
@@ -98,7 +98,6 @@ class ftpepollserver {
 std::string getlineok(std::string line);
 bool sendn(int fd, char* data, ssize_t len);
 void set_nonblock(int fd);
-void set_block(int fd);
 Socket::Socket(int domain, int type, int protocol)
     : fd_(socket(domain, type, protocol)) {}
 
@@ -234,15 +233,14 @@ void ftpepollserver::run() {
                     add_epoll(cfd, EPOLLIN | EPOLLET | EPOLLOUT);
                 }
             } else if(events[i].events&EPOLLIN){
-                ssize_t pos = 0;
-                handle_read(fd,pos);
+                handle_read(fd);
             } else if (events[i].events & EPOLLOUT) {
                 handle_write(fd);
             }
             }
     }
 }
-void ftpepollserver::handle_read(int fd,int pos){
+void ftpepollserver::handle_read(int fd){
     ssize_t n;
     char buf[4096];
     while(1){
@@ -307,7 +305,7 @@ void ftpepollserver::handle_write(int fd){
         n = send(fd, clients[fd].writebuf.data(), clients[fd].writebuf.size(),0);
         if(n>0){
             clients[fd].writebuf.erase(0, n);
-        }else if(n==-1){
+        }else if(n<0){
             if(errno==EAGAIN||errno==EWOULDBLOCK){
                 break;
             }
@@ -324,17 +322,17 @@ void ftpepollserver::handle_write(int fd){
 }
 }
 void ftpepollserver::add_epoll(int fd, uint32_t events) {
-    epoll_event ev{};
-    ev.events = events;
-    ev.data.fd = fd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
+    epoll_event event{};
+    event.events = events;
+    event.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
 }
 
 void ftpepollserver::del_epoll(int fd, uint32_t events) {
-    epoll_event ev{};
-    ev.events = events;
-    ev.data.fd = fd;
-    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &ev);
+    epoll_event event{};
+    event.events = events;
+    event.data.fd = fd;
+    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
 }
 void ftpepollserver::mod_epoll(int fd,uint32_t events){
     epoll_event event{};
@@ -419,7 +417,6 @@ int ftpepollserver::acceptdata(Client& client) {
 void ftpepollserver::LIST(int cfd, Client& client) {
     if (client.pasvfd == -1) {
         std::lock_guard<std::mutex> lock(client.mutex);
-        ;
         clients[cfd].writebuf += "425 need pasv first\r\n";
         mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
@@ -488,18 +485,19 @@ void ftpepollserver::RETR(int cfd, Client& client, std::string path) {
     ssize_t n = 0;
     bool ok = true;
     while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        send(datafd, buf, n, 0);
+        if(send(datafd, buf, n, 0)!=n){
+            ok = false;
+            break;
+        };
     }
 
     close(fd);
     close(datafd);
-    std::string num = ok ? "226" : "426";
-    clients[cfd].writebuf += num;
     if(ok){
-        clients[cfd].writebuf += "retr complete\r\n";
+        clients[cfd].writebuf += "226 retr complete\r\n";
 
     }else{
-        clients[cfd].writebuf += "connect close\r\n";
+        clients[cfd].writebuf += "426 connect close\r\n";
     }
     mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
