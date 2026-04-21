@@ -46,17 +46,18 @@ struct Client {
     bool hasuser = false;
     bool islogin = false;
     std::string username;
+    std::mutex mutex;
     int pasvfd = -1;
     std::string readbuf;
     std::string writebuf;
 };
 class Threadpool {
-public:
-    Threadpool(size_t num = std::thread::hardware_concurrency());
+   public:
+    Threadpool(ssize_t num = std::thread::hardware_concurrency());
     ~Threadpool();
     void addtask(std::function<void()> task);
 
-private:
+   private:
     void work();
 
     bool stop_ = false;
@@ -95,9 +96,7 @@ class ftpepollserver {
 };
 
 std::string getlineok(std::string line);
-bool sendn(int fd, char* data, size_t len);
-bool sendstr(int fd, std::string& text);
-void sendmessage(int fd, int code, std::string text);
+bool sendn(int fd, char* data, ssize_t len);
 void set_nonblock(int fd);
 void set_block(int fd);
 Socket::Socket(int domain, int type, int protocol)
@@ -145,35 +144,54 @@ uint16_t IPV4::getport() {
     return ntohs(addr_.sin_port);
 }
 
-Threadpool::Threadpool(size_t n){
-    if(n==0){
-        n = 4;
+Threadpool::Threadpool(ssize_t num) {
+    if (num == 0) {
+        num = 4;
     }
-    for (int i = 0; i < n;i++){
-        std::thread t(&Threadpool::work, this);
-        threads_.push_back(std::move(t));
+    for (ssize_t i = 0; i < num; ++i) {
+        threads_.emplace_back(&Threadpool::work, this);
     }
 }
-Threadpool::~Threadpool(){
-    std::unique_lock<std::mutex> lock(mutex_);
+
+Threadpool::~Threadpool() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+    }
     cond_.notify_all();
     for (auto& t : threads_) {
-        if(t.joinable()){
+        if (t.joinable()) {
             t.join();
         }
     }
 }
-void Threadpool::work(){
 
-}
 void Threadpool::addtask(std::function<void()> task) {
-
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push(std::move(task));
+    }
+    cond_.notify_one();
 }
-ftpepollserver::ftpepollserver(uint16_t port)
-    : port_(port), listensock_(AF_INET, SOCK_STREAM, 0) {
-    account["ftp"] = "123456";
-    set_nonblock(listensock_.fd());
+
+void Threadpool::work() {
+    while (true) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cond_.wait(lock, [this]() { return stop_ || !tasks_.empty(); });
+            if (stop_ && tasks_.empty()) {
+                return;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop();
+        }
+        task();
+    }
+}
+ftpepollserver::ftpepollserver(uint16_t port):port_(port),listensock_(AF_INET,SOCK_STREAM,0){
     epfd = epoll_create1(0);
+    account["ftp"] = "123456";
 }
 ftpepollserver::~ftpepollserver(){
     close(epfd);
@@ -190,9 +208,10 @@ void ftpepollserver::run() {
 
     IPV4 addr(port_);
     bind(listensock_.fd(), addr.change(), addr.len());
-    listen(listensock_.fd(), 16);
+    listen(listensock_.fd(), 10);
+    set_nonblock(listensock_.fd());
     std::cout << "ftp server listen" << port_ << '\n';
-    add_epoll(listensock_.fd(), EPOLLET | EPOLLIN);
+    add_epoll(listensock_.fd(),  EPOLLIN|EPOLLET);
     struct epoll_event events[MAX_SIZE];
     while (1) {
         int n = epoll_wait(epfd, events, MAX_SIZE, -1);
@@ -201,14 +220,21 @@ void ftpepollserver::run() {
             if (fd == listensock_.fd()) {
                 while (1) {
                     int cfd = accept(listensock_.fd(), nullptr, nullptr);
+                    if(cfd==-1){
+                        if(errno==EAGAIN||errno==EWOULDBLOCK){
+                            break;
+                        }else{
+                            perror("accept");
+                            break;
+                        }
+                    }
                     std::cout << "有一个客户端成功连接\n";
                     set_nonblock(cfd);
-                    clients[cfd] = Client();
                     clients[cfd].writebuf += "220 ftp server ready\r\n";
-                    add_epoll(cfd, EPOLLIN | EPOLLET |EPOLLOUT);
+                    add_epoll(cfd, EPOLLIN | EPOLLET | EPOLLOUT);
                 }
             } else if(events[i].events&EPOLLIN){
-                size_t pos = 0;
+                ssize_t pos = 0;
                 handle_read(fd,pos);
             } else if (events[i].events & EPOLLOUT) {
                 handle_write(fd);
@@ -217,50 +243,85 @@ void ftpepollserver::run() {
     }
 }
 void ftpepollserver::handle_read(int fd,int pos){
-    size_t n;
+    ssize_t n;
     char buf[4096];
     while(1){
     n = read(fd, buf, sizeof(buf));
-        if(n<=0){
+       if(n>0){
+           clients[fd].readbuf.append(buf, n);
+       }else if(n==0){
+           close(fd);
+           clients.erase(fd);
+           del_epoll(fd, 0);
+           return;
+       }else {
+        if(errno==EAGAIN||errno==EWOULDBLOCK){
+            break;
+        }else{
             close(fd);
             return;
-        }else{
-    clients[fd].readbuf.append(buf,pos,n);
-    pos += n;
         }
-        std::string cmd, arg;
-        int p = clients[fd].readbuf.find(' ');
-        if(p==std::string::npos){
-            cmd = clients[fd].readbuf;
-        }else{
-            cmd = clients[fd].readbuf.substr(0, p);
-            arg = clients[fd].readbuf.substr(p + 1);
-        }
+       }
+    }
+        while(1){
+            ssize_t pos = clients[fd].readbuf.find("\n");
+            if(pos==std::string::npos){
+                break;
+            }
+            std::string s = clients[fd].readbuf.substr(0, pos + 1);
+            clients[fd].readbuf.erase(0, pos + 1);
+            s = getlineok(s);
+            std::string cmd, arg;
+            int p = s.find(' ');
+            if (p == std::string::npos) {
+                cmd = s;
+            } else {
+                cmd = s.substr(0, p);
+                arg = s.substr(p + 1);
+            }
         if(cmd=="USER"){
             USER(fd, clients[fd], arg);
         } else if (cmd == "PASS") {
             PASS(fd, clients[fd], arg);
         } else if (cmd == "QUIT") {
             clients[fd].writebuf += "221,bye bye\r\n";
+            mod_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET);
         } else if (!strcasecmp(cmd.c_str(), "pasv")) {
+            PASV(fd, clients[fd]);
         } else if (!strcasecmp(cmd.c_str(), "list")) {
             pool.addtask([this, fd]() { LIST(fd, clients[fd]); });
         } else if (!strcasecmp(cmd.c_str(), "stor")) {
             pool.addtask([this, fd,arg]() { STOR(fd, clients[fd],arg); });
         } else if (!strcasecmp(cmd.c_str(), "retr")) {
             pool.addtask([this, fd,arg]() { RETR(fd, clients[fd], arg); });
-        }else{
+        } else {
             clients[fd].writebuf += "502 command errno\r\n";
+            mod_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET);
         }
     }
 }
 void ftpepollserver::handle_write(int fd){
-    size_t n;
-    while(!clients[fd].writebuf.empty()){
+    ssize_t n;
+    std::lock_guard<std::mutex> lock(clients[fd].mutex);
+    while (!clients[fd].writebuf.empty()) {
         n = send(fd, clients[fd].writebuf.data(), clients[fd].writebuf.size(),0);
-        clients[fd].writebuf.erase(0,n);
+        if(n>0){
+            clients[fd].writebuf.erase(0, n);
+        }else if(n==-1){
+            if(errno==EAGAIN||errno==EWOULDBLOCK){
+                break;
+            }
+            close(fd);
+            clients.erase(fd);
+            del_epoll(fd, 0);
+            return;
+        }
     }
-    mod_epoll(fd, EPOLLIN | EPOLLET);
+    if(clients[fd].writebuf.empty()){
+        mod_epoll(fd, EPOLLET | EPOLLIN);
+    }else{
+    mod_epoll(fd, EPOLLIN|EPOLLET|EPOLLOUT);
+}
 }
 void ftpepollserver::add_epoll(int fd, uint32_t events) {
     epoll_event ev{};
@@ -284,30 +345,36 @@ void ftpepollserver::mod_epoll(int fd,uint32_t events){
 void ftpepollserver::USER(int cfd, Client& client, std::string& user) {
     if (user.empty()) {
         clients[cfd].writebuf += "501 need username\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     if (account.count(user) == 0) {
         clients[cfd].writebuf += "530 username exist\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     client.username = user;
     client.hasuser = true;
     client.islogin = false;
     clients[cfd].writebuf += "331 need password\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 void ftpepollserver::PASS(int cfd, Client& client, std::string& pass) {
     if (!client.hasuser) {
         clients[cfd].writebuf += "503 need username\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     auto it = account.find(client.username);
     if (it == account.end() || it->second != pass) {
         clients[cfd].writebuf += "530 password errno\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     client.islogin = true;
     clients[cfd].writebuf += "230 login succeful\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 void ftpepollserver::PASV(int cfd, Client& client) {
@@ -333,11 +400,11 @@ void ftpepollserver::PASV(int cfd, Client& client) {
     int p2 = port % 256;
 
     client.pasvfd = fd;
-    std::string s = "";
-    s = "227 Entering Passive Mode (" + std::to_string(ip[0]) + "," +
+    clients[cfd].writebuf+="227 Entering Passive Mode (" + std::to_string(ip[0]) + "," +
          std::to_string(ip[1]) + "," + std::to_string(ip[2]) + "," +
          std::to_string(ip[3]) + "," + std::to_string(p1) + "," +
-         std::to_string(p2) + ")";
+         std::to_string(p2) + ")\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 int ftpepollserver::acceptdata(Client& client) {
@@ -351,56 +418,69 @@ int ftpepollserver::acceptdata(Client& client) {
 
 void ftpepollserver::LIST(int cfd, Client& client) {
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "need pasv first");
+        std::lock_guard<std::mutex> lock(client.mutex);
+        ;
+        clients[cfd].writebuf += "425 need pasv first\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
-    sendmessage(cfd, 150, "open data connection for list");
+    std::lock_guard<std::mutex> lock(client.mutex);
+    clients[cfd].writebuf += "150 open data connection for list\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
     int datafd = acceptdata(client);
     if (datafd == -1) {
-        sendmessage(cfd, 425, "data connect failed");
+        clients[cfd].writebuf += "425 data connect failed\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
     DIR* dir = opendir(".");
     if (dir == nullptr) {
         close(datafd);
-        sendmessage(cfd, 550, "open dir failed");
+        clients[cfd].writebuf += "550 open dir failed\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
     dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
         std::string line = std::string(ent->d_name) + "\r\n";
-        if (!sendstr(datafd, line)) {
+        if(!sendn(datafd,line.data(),line.size())){
             break;
         }
     }
     closedir(dir);
     close(datafd);
-    sendmessage(cfd, 226, "list complete");
+    clients[cfd].writebuf += "226 list complete\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 void ftpepollserver::RETR(int cfd, Client& client, std::string path) {
     if (path.empty()) {
-        sendmessage(cfd, 501, "need file name");
+        clients[cfd].writebuf += "501 need file name\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "need pasv first");
+        clients[cfd].writebuf += "425 need pasv first\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
     int fd = open(path.c_str(), O_RDONLY);
     if (fd == -1) {
-        sendmessage(cfd, 550, "file not found");
+        clients[cfd].writebuf += "550 file not found\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
-    sendmessage(cfd, 150, "open data connect for retr");
+    clients[cfd].writebuf += "150 open data connect for retr\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
     int datafd = acceptdata(client);
     if (datafd == -1) {
         close(fd);
-        sendmessage(cfd, 425, "data connect failed");
+        clients[cfd].writebuf += "425 data connect failed\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
@@ -408,39 +488,48 @@ void ftpepollserver::RETR(int cfd, Client& client, std::string path) {
     ssize_t n = 0;
     bool ok = true;
     while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        if (!sendn(datafd, buf, static_cast<size_t>(n))) {
-            ok = false;
-            break;
-        }
+        send(datafd, buf, n, 0);
     }
 
     close(fd);
     close(datafd);
-    int num = ok ? 226 : 426;
-    sendmessage(cfd, num, ok ? "retr complete" : "connect close");
+    std::string num = ok ? "226" : "426";
+    clients[cfd].writebuf += num;
+    if(ok){
+        clients[cfd].writebuf += "retr complete\r\n";
+
+    }else{
+        clients[cfd].writebuf += "connect close\r\n";
+    }
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
 }
 
 void ftpepollserver::STOR(int cfd, Client& client, std::string path) {
     if (path.empty()) {
-        sendmessage(cfd, 501, "need file name");
+        clients[cfd].writebuf += "501 need file name\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
     if (client.pasvfd == -1) {
-        sendmessage(cfd, 425, "need pasv first");
+        clients[cfd].writebuf += "425 need pasv first\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
     int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
-        sendmessage(cfd, 550, "create file failed");
+        clients[cfd].writebuf += "550 create file failed\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
-    sendmessage(cfd, 150, "open data connect for stor");
+    clients[cfd].writebuf += "150 open data connect for stor\r\n";
+    mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
     int datafd = acceptdata(client);
     if (datafd == -1) {
         close(fd);
-        sendmessage(cfd, 425, "data connect failed");
+        clients[cfd].writebuf += "425 data connect failed\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
         return;
     }
 
@@ -448,7 +537,7 @@ void ftpepollserver::STOR(int cfd, Client& client, std::string path) {
     ssize_t n = 0;
     bool ok = true;
     while ((n = recv(datafd, buf, sizeof(buf), 0)) > 0) {
-        if (write(fd, buf, static_cast<size_t>(n)) != n) {
+        if (write(fd, buf, static_cast<ssize_t>(n)) != n) {
             ok = false;
             break;
         }
@@ -456,8 +545,13 @@ void ftpepollserver::STOR(int cfd, Client& client, std::string path) {
 
     close(fd);
     close(datafd);
-    int num = ok ? 226 : 426;
-    sendmessage(cfd, num, ok ? "stor complete" : "connect close");
+    if(ok){
+        clients[cfd].writebuf += "226 stor complete\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
+    }else{
+        clients[cfd].writebuf += "426 connect close\r\n";
+        mod_epoll(cfd, EPOLLIN | EPOLLOUT | EPOLLET);
+    }
 }
 
 void ftpepollserver::closePASV(Client& client) {
@@ -472,35 +566,20 @@ std::string getlineok(std::string line) {
     }
     return line;
 }
-bool sendn(int fd, char* data, size_t len) {
+bool sendn(int fd, char* data, ssize_t len) {
     while (len > 0) {
         ssize_t n = send(fd, data, len, 0);
         if (n <= 0) {
             return false;
         }
         data += n;
-        len -= static_cast<size_t>(n);
+        len -= static_cast<ssize_t>(n);
     }
     return true;
 }
-
-bool sendstr(int fd, std::string& text) {
-    return sendn(fd, text.data(), text.size());
-}
-
-void sendmessage(int fd, int code, std::string text) {
-    std::string line = std::to_string(code) + " " + text + "\r\n";
-    sendstr(fd, line);
-}
-
 void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-void set_block(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags |O_NONBLOCK);
 }
 int main() {
     ftpepollserver server(2100);

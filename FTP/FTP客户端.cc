@@ -192,7 +192,7 @@ void FTPClient::RETR( std::string args) {
     ssize_t n = 0;
     while ((n = recv(datafd, buf, sizeof(buf), 0)) > 0) {
         write(fd, buf,n) ;
-
+    }
     close(fd);
     close(datafd);
     resp = readline(Client_.fd());
@@ -200,7 +200,6 @@ void FTPClient::RETR( std::string args) {
     if (getcode(resp) == 226) {
         std::cout << "下载成功\n";
     }
-}
 }
 void FTPClient::STOR( std::string args) {
     std::string local;
@@ -332,6 +331,9 @@ std::string readline(int fd) {
     char ch = 0;
     while (true) {
          ssize_t n = recv(fd, &ch, 1, 0);
+         if(n<=0){
+             return "";
+         }
         line.push_back(ch);
         if (ch == '\n') {
             break;
